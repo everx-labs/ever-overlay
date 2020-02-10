@@ -1,0 +1,30 @@
+[package]
+edition = "2018"
+build = "./common/build/build.rs"
+name = "dht"
+version = "0.0.1"
+description = "DHT protocol library"
+
+[dependencies]
+adnl = { git = "ssh://git@github.com/tonlabs/adnl", package = "adnl", features = ["node", "test"] }
+failure = "0.1.6"
+hex = "^0"
+ton_api = { git = "ssh://git@github.com/tonlabs/TON-Transport.git", branch = "feature/manual/13.01.2020", package = "ton_api" }
+log = "0.4.8"
+rand = "0.7.2"
+tokio = { version = "0.2.5", features = ["rt-threaded", "stream", "tcp", "udp"] }
+#rustc-serialize = "^0.3"
+
+[dev-dependencies]
+arrayref = "0.3.5"
+base64 = "0.11.0"
+ed25519-dalek = "1.0.0-pre.3"
+hex = "^0"
+log4rs = "0.8.3"
+sha2 = "0.8.0"
+
+[features]
+test = []
+
+[replace]
+"ssh://git@github.com/tonlabs/adnl#0.0.5" = { path = "../adnl" }	
