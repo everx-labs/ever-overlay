@@ -183,12 +183,13 @@ type CatchainReceiver = BroadcastReceiver<
 
 struct OverlayShard {
     adnl: Arc<AdnlNode>,
-    message_prefix: Vec<u8>,
+    bad_peers: lockfree::set::Set<Arc<KeyId>>,
     known_peers: AddressCache,
+    message_prefix: Vec<u8>,
     neighbours: AddressCache,
     nodes: lockfree::map::Map<Arc<KeyId>, Node>,
     overlay_id: Arc<OverlayShortId>,
-    overlay_key: Option<Arc<KeyId>>,
+    overlay_key: Option<Arc<KeyOption>>,
     past_broadcasts: lockfree::map::Map<BroadcastId, ()>,
     purge_broadcasts: lockfree::queue::Queue<BroadcastId>,
     purge_count: AtomicU32,
@@ -647,7 +648,16 @@ impl OverlayShard {
     } 
 
     fn update_neighbours(&self, n: u32) -> Result<()> {
-        self.random_peers.random_set(&self.neighbours, n)
+        if self.overlay_key.is_some() {
+            self.known_peers.random_set(&self.neighbours, None, n)
+        } else {
+            self.random_peers.random_set(&self.neighbours, Some(&self.bad_peers), n)
+        }
+    }
+
+    fn update_random_peers(&self, n: u32) -> Result<()> {
+        self.known_peers.random_set(&self.random_peers, Some(&self.bad_peers), n)?;
+        self.update_neighbours(OverlayNode::MAX_SHARD_NEIGHBOURS)
     }
 
 }
@@ -687,6 +697,7 @@ impl OverlayNode {
     const MAX_SHARD_PEERS: u32 = 20;
     const MAX_SIZE_ORDINARY_BROADCAST: usize = 768;
     const TIMEOUT_GC: u64 = 1000; // Milliseconds
+    const TIMEOUT_PEERS: u64 = 60000; // Milliseconds
 
     /// Constructor 
     pub fn with_adnl_node_and_zero_state(
@@ -706,7 +717,11 @@ impl OverlayNode {
     }
 
     /// Add overlay query consumer
-    pub fn add_consumer(&self, overlay_id: &Arc<OverlayShortId>, consumer: Arc<dyn QueriesConsumer>) -> Result<bool> {
+    pub fn add_consumer(
+        &self, 
+        overlay_id: &Arc<OverlayShortId>, 
+        consumer: Arc<dyn QueriesConsumer>
+    ) -> Result<bool> {
         log::debug!(target: TARGET, "Add consumer {} to overlay", overlay_id);
         add_object_to_map(
             &self.consumers,
@@ -719,10 +734,10 @@ impl OverlayNode {
     pub async fn add_private_overlay(
         &self, 
         overlay_id: &Arc<OverlayShortId>,
-        local_key: &Arc<KeyId>, 
+        overlay_key: &Arc<KeyOption>, 
         peers: &Vec<Arc<KeyId>>
     ) -> Result<bool> {
-        if self.add_overlay(overlay_id, Some(local_key.clone())).await? {
+        if self.add_overlay(overlay_id, Some(overlay_key.clone())).await? {
             let shard = self.shards.get(overlay_id).ok_or_else(
                 || error!("Cannot add the private overlay {}", overlay_id)
             )?;
@@ -730,6 +745,7 @@ impl OverlayNode {
             for peer in peers {
                 shard.known_peers.put(peer.clone())?;
             }
+            shard.update_neighbours(Self::MAX_SHARD_NEIGHBOURS)?;
             Ok(true)
         } else {
             Ok(false)
@@ -739,12 +755,12 @@ impl OverlayNode {
     /// Add private overlay peers 
     pub fn add_private_peers(
         &self, 
-        local_key: &Arc<KeyId>, 
+        local_adnl_key: &Arc<KeyId>, 
         peers: Vec<(IpAddress, KeyOption)>
     ) -> Result<Vec<Arc<KeyId>>> {
         let mut ret = Vec::new();
         for (ip, key) in peers {
-            if let Some(peer) = self.adnl.add_peer(local_key, &ip, &Arc::new(key))? {
+            if let Some(peer) = self.adnl.add_peer(local_adnl_key, &ip, &Arc::new(key))? {
                 ret.push(peer)
             }
         }
@@ -779,12 +795,13 @@ impl OverlayNode {
         } else {
             return Ok(None)
         };
+        shard.bad_peers.remove(&ret);
         shard.known_peers.put(ret.clone())?;
         if shard.random_peers.count() < Self::MAX_SHARD_PEERS {
             shard.random_peers.put(ret.clone())?;
         }            
         if shard.neighbours.count() < Self::MAX_SHARD_NEIGHBOURS {
-            shard.update_neighbours(Self::MAX_SHARD_NEIGHBOURS)?;
+            shard.neighbours.put(ret.clone())?;
         }          
         add_object_to_map_with_update(
             &shard.nodes,
@@ -813,12 +830,14 @@ impl OverlayNode {
         let shard = self.shards.get(overlay_id).ok_or_else(
             || error!("Trying broadcast to unknown overlay {}", overlay_id)
         )?;
+        let shard = shard.val();
+        let overlay_key = shard.overlay_key.as_ref().unwrap_or(&self.node_key);
         if data.len() <= Self::MAX_SIZE_ORDINARY_BROADCAST {
-            shard.val().send_broadcast(data, &self.node_key).await?
+            shard.send_broadcast(data, overlay_key).await?
         } else {
-            OverlayShard::create_fec_send_transfer(shard.val(), data, &self.node_key)?
+            OverlayShard::create_fec_send_transfer(shard, data, overlay_key)?
         }
-        Ok(shard.val().neighbours.count())
+        Ok(shard.neighbours.count())
     } 
 
     /// Calculate overlay ID for shard
@@ -845,6 +864,7 @@ impl OverlayNode {
             shard.val().overlay_key.as_ref().ok_or_else(
                 || error!("Try to delete public overlay {}", overlay_id)
             )?; 
+            self.shards.remove(overlay_id);
             Ok(true)
         } else {
             Ok(false)
@@ -862,6 +882,29 @@ impl OverlayNode {
             ret = self.adnl.delete_peer(local_key, peer)? || ret
         }    
         Ok(ret)
+    }
+
+    /// Delete public overlay peer 
+    pub fn delete_public_peer(
+        &self, 
+        peer: &Arc<KeyId>,
+        overlay_id: &Arc<OverlayShortId>
+    ) -> Result<bool> {
+        let shard = self.shards.get(overlay_id).ok_or_else(
+            || error!("Trying to delete peer from unknown public overlay {}", overlay_id)
+        )?;
+        let shard = shard.val(); 
+        if shard.overlay_key.is_some() {
+            fail!("Trying to delete public peer from private overlay {}", overlay_id)
+        }
+        match shard.bad_peers.insert_with(peer.clone(), |_, prev| prev.is_none()) {
+            lockfree::set::Insertion::Created => (),      
+            _ => return Ok(false)
+        }
+        if shard.random_peers.contains(peer) {
+            shard.update_random_peers(Self::MAX_SHARD_PEERS)?
+        }
+        self.adnl.delete_peer(self.node_key.id(), peer)
     }
 
     /// Get query prefix
@@ -891,7 +934,7 @@ impl OverlayNode {
         if let Some(answer) = answer {
             let answer: NodesBoxed = Query::parse(answer, &query)?;
             log::trace!(target: TARGET, "Got random peers from {}", dst);
-            Ok(Some(Self::process_random_peers(overlay_id, answer.only())?))
+            Ok(Some(self.process_random_peers(overlay_id, answer.only())?))
         } else {
             log::warn!(target: TARGET, "No random peers from {}", dst);
             Ok(None)    
@@ -980,7 +1023,7 @@ impl OverlayNode {
     async fn add_overlay(
         &self, 
         overlay_id: &Arc<OverlayShortId>, 
-        overlay_key: Option<Arc<KeyId>>
+        overlay_key: Option<Arc<KeyOption>>
     ) -> Result<bool> {
         log::debug!(target: TARGET, "Add overlay {} to node", overlay_id);
         let added = add_object_to_map(
@@ -1007,8 +1050,9 @@ impl OverlayNode {
                 };
                 let shard = OverlayShard {
                     adnl: self.adnl.clone(),
-                    message_prefix: serialize(&message_prefix)?,
+                    bad_peers: lockfree::set::Set::new(),
                     known_peers: AddressCache::with_limit(Self::MAX_PEERS),
+                    message_prefix: serialize(&message_prefix)?,
                     neighbours: AddressCache::with_limit(Self::MAX_SHARD_NEIGHBOURS), 
                     nodes: lockfree::map::Map::new(),
                     overlay_id: overlay_id.clone(),
@@ -1039,12 +1083,25 @@ impl OverlayNode {
             let shard = shard.val().clone();
             tokio::spawn(
                 async move {
+                    let mut timeout_peers = 0;
                     while Arc::strong_count(&shard) > 1 {
                         while shard.purge_count.load(Ordering::Relaxed) > Self::MAX_BROADCAST_LOG {
                             if let Some(bcast_id) = shard.purge_broadcasts.pop() {
                                 shard.past_broadcasts.remove(&bcast_id);
                             }
                             shard.purge_count.fetch_sub(1, Ordering::Relaxed);
+                        }
+                        timeout_peers += Self::TIMEOUT_GC;
+                        if timeout_peers > Self::TIMEOUT_PEERS {
+                            let result = if shard.overlay_key.is_some() {
+                                shard.update_neighbours(1)
+                            } else {
+                                shard.update_random_peers(1)
+                            };
+                            if let Err(e) = result {
+                                log::error!(target: TARGET, "Error: {}", e)
+                            }
+                            timeout_peers = 0;
                         }
                         tokio::time::delay_for(Duration::from_millis(Self::TIMEOUT_GC)).await;
                     }
@@ -1057,7 +1114,7 @@ impl OverlayNode {
     fn prepare_random_peers(&self, shard: &OverlayShard) -> Result<Nodes> {
         let mut ret = vec![self.sign_local_node(&shard.overlay_id)?];
         let nodes = AddressCache::with_limit(Self::MAX_RANDOM_PEERS);
-        shard.random_peers.random_set(&nodes, Self::MAX_RANDOM_PEERS)?;
+        shard.random_peers.random_set(&nodes, None, Self::MAX_RANDOM_PEERS)?;
         let (mut iter, mut current) = nodes.first();
         while let Some(node) = current {
             if let Some(node) = shard.nodes.get(&node) {
@@ -1071,11 +1128,18 @@ impl OverlayNode {
         Ok(ret)
     }
 
-    fn process_random_peers(overlay_id: &Arc<OverlayShortId>, peers: Nodes) -> Result<Vec<Node>> {
+    fn process_random_peers(
+        &self, 
+        overlay_id: &Arc<OverlayShortId>, 
+        peers: Nodes
+    ) -> Result<Vec<Node>> {
         let mut ret = Vec::new();
         log::trace!(target: TARGET, "-------- Got random peers:");
         let mut peers = peers.nodes.0;
         while let Some(peer) = peers.pop() {
+            if self.node_key.id().data() == KeyOption::from_tl_public_key(&peer.id)?.id().data() {
+                continue
+            }
             log::trace!(target: TARGET, "{:?}", peer);
             if let Err(e) = OverlayUtils::verify_node(overlay_id, &peer) {
                 log::warn!(target: TARGET, "Error when verifying Overlay peer: {}", e);
@@ -1092,7 +1156,7 @@ impl OverlayNode {
         query: GetRandomPeers
     ) -> Result<Nodes> {
         log::trace!(target: TARGET, "Got random peers request");
-        Self::process_random_peers(&shard.overlay_id, query.peers)?;
+        self.process_random_peers(&shard.overlay_id, query.peers)?;
         self.prepare_random_peers(shard)
     }
 
