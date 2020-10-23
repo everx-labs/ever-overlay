@@ -21,7 +21,7 @@ adnl = { git = "https://github.com/tonlabs/ton-labs-adnl.git", features = ["node
 rldp = { git = "https://github.com/tonlabs/ton-labs-rldp.git" }
 ton_block = { git = "https://github.com/tonlabs/ton-labs-block.git" }
 ton_types = { git = "https://github.com/tonlabs/ton-labs-types.git" }
-lockfree = { git = "https://github.com/tonlabs/lockfree.git", package = "lockfree" }
+lockfree = { git = "https://github.com/tonlabs/lockfree.git" }
 
 [dev-dependencies]
 dht = { git = "https://github.com/tonlabs/ton-labs-dht.git" }

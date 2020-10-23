@@ -358,11 +358,12 @@ impl OverlayShard {
     fn create_fec_send_transfer(
         overlay_shard: &Arc<Self>, 
         data: &[u8], 
-        key: &Arc<KeyOption>
+        source: &Arc<KeyOption>,
+        overlay_key: &Arc<KeyId>
     ) -> Result<()> {
 
         let overlay_shard_clone = overlay_shard.clone();
-        let key_clone = key.clone();
+        let source = source.clone();
         let (sender, mut reader) = tokio::sync::mpsc::unbounded_channel();
 
         let data_size = data.len() as u32;
@@ -383,7 +384,7 @@ impl OverlayShard {
                 while transfer.seqno <= max_seqno {
                     for _ in 0..4 {
                         let result = overlay_shard_clone
-                            .prepare_fec_broadcast(&mut transfer, &key_clone)
+                            .prepare_fec_broadcast(&mut transfer, &source)
                             .and_then(
                                 |data| {
                                     sender.send(data)?; 
@@ -406,12 +407,12 @@ impl OverlayShard {
         );
 
         let overlay_shard = overlay_shard.clone();
-        let key = key.id().clone();
+        let overlay_key = overlay_key.clone();
 
         tokio::spawn(
             async move {
                 while let Some(buf) = reader.recv().await {
-                    if let Err(err) = overlay_shard.distribute_broadcast(&buf, &key).await {
+                    if let Err(err) = overlay_shard.distribute_broadcast(&buf, &overlay_key).await {
                         log::warn!(
                             target: TARGET, 
                             "Error when sending overlay {} FEC broadcast: {}",
@@ -616,7 +617,12 @@ impl OverlayShard {
         Ok(())
     }
 
-    async fn send_broadcast(&self, data: &[u8], key: &Arc<KeyOption>) -> Result<()> {    
+    async fn send_broadcast(
+        &self, 
+        data: &[u8], 
+        source: &Arc<KeyOption>,
+        overlay_key: &Arc<KeyId>
+    ) -> Result<()> {    
         let date = Version::get();
         let signature = Self::calc_broadcast_to_sign(data, date, [0u8; 32])?;
 /*        
@@ -633,9 +639,9 @@ impl OverlayShard {
         }.into_boxed();
         let signature = key.sign(&serialize(&to_sign)?)?;
 */
-        let signature = key.sign(&signature)?;
+        let signature = source.sign(&signature)?;
         let bcast = BroadcastOrd {
-            src: key.into_tl_public_key()?,
+            src: source.into_tl_public_key()?,
             certificate: OverlayCertificate::Overlay_EmptyCertificate,
             flags: Self::FLAG_BCAST_ANY_SENDER,
             data: ton::bytes(data.to_vec()),
@@ -644,7 +650,7 @@ impl OverlayShard {
         }.into_boxed();                                   
         let mut buf = self.message_prefix.clone();
         serialize_append(&mut buf, &bcast)?;
-        self.distribute_broadcast(&buf, key.id()).await
+        self.distribute_broadcast(&buf, overlay_key).await
     } 
 
     fn update_neighbours(&self, n: u32) -> Result<()> {
@@ -676,7 +682,7 @@ struct SendTransferFec {
 
 #[async_trait::async_trait]
 pub trait QueriesConsumer: Send + Sync {
-    async fn try_consume_query(&self, query: TLObject) -> Result<QueryResult>;
+    async fn try_consume_query(&self, query: TLObject, peers: &AdnlPeers) -> Result<QueryResult>;
 }
 
 /// Overlay Node
@@ -825,17 +831,23 @@ impl OverlayNode {
     }
 
     /// Broadcast message 
-    pub async fn broadcast(&self, overlay_id: &Arc<OverlayShortId>, data: &[u8]) -> Result<u32> {
+    pub async fn broadcast(
+        &self,
+        overlay_id: &Arc<OverlayShortId>, 
+        data: &[u8], 
+        source: Option<&Arc<KeyOption>>
+    ) -> Result<u32> {
         log::trace!(target: TARGET, "Broadcast {} bytes", data.len());
         let shard = self.shards.get(overlay_id).ok_or_else(
             || error!("Trying broadcast to unknown overlay {}", overlay_id)
         )?;
         let shard = shard.val();
-        let overlay_key = shard.overlay_key.as_ref().unwrap_or(&self.node_key);
+        let source = source.unwrap_or(&self.node_key);
+        let overlay_key = shard.overlay_key.as_ref().unwrap_or(&self.node_key).id();
         if data.len() <= Self::MAX_SIZE_ORDINARY_BROADCAST {
-            shard.send_broadcast(data, overlay_key).await?
+            shard.send_broadcast(data, source, overlay_key).await?
         } else {
-            OverlayShard::create_fec_send_transfer(shard, data, overlay_key)?
+            OverlayShard::create_fec_send_transfer(shard, data, source, overlay_key)?
         }
         Ok(shard.neighbours.count())
     } 
@@ -954,10 +966,12 @@ impl OverlayNode {
         overlay_id: &Arc<OverlayShortId>
     ) -> Result<()> {
         let shard = self.shards.get(overlay_id).ok_or_else(
-            || error!("Sending message to unknown overlay {}", overlay_id)
+            || error!("Sending ADNL message to unknown overlay {}", overlay_id)
         )?;
-        let peers = AdnlPeers::with_keys(self.node_key.id().clone(), dst.clone());
-        let mut buf = shard.val().message_prefix.clone();
+        let shard = shard.val();
+        let src = shard.overlay_key.as_ref().unwrap_or(&self.node_key).id();
+        let peers = AdnlPeers::with_keys(src.clone(), dst.clone());
+        let mut buf = shard.message_prefix.clone();
         buf.extend_from_slice(data);
         self.adnl.send_custom(&buf, &peers).await
     }
@@ -971,11 +985,13 @@ impl OverlayNode {
         timeout: Option<u64>
     ) -> Result<Option<TLObject>> {
         let shard = self.shards.get(overlay_id).ok_or_else(
-            || error!("Sending query to unknown overlay {}", overlay_id)
+            || error!("Sending ADNL query to unknown overlay {}", overlay_id)
         )?;
-        let peers = AdnlPeers::with_keys(self.node_key.id().clone(), dst.clone());
+        let shard = shard.val();
+        let src = shard.overlay_key.as_ref().unwrap_or(&self.node_key).id();
+        let peers = AdnlPeers::with_keys(src.clone(), dst.clone());
         self.adnl.query_with_prefix(
-            Some(&shard.val().query_prefix), 
+            Some(&shard.query_prefix), 
             query,
             &peers,
             timeout
@@ -990,9 +1006,14 @@ impl OverlayNode {
         data: &[u8],
         max_answer_size: Option<i64>,
         roundtrip_adnl: Option<u64>,
-        roundtrip_rldp: Option<u64>
+        roundtrip_rldp: Option<u64>,
+        overlay_id: &Arc<OverlayShortId>
     ) -> Result<Option<Vec<u8>>> {
-        let peers = AdnlPeers::with_keys(self.node_key.id().clone(), dst.clone());
+        let shard = self.shards.get(overlay_id).ok_or_else(
+            || error!("Sending RLDP query to unknown overlay {}", overlay_id)
+        )?;
+        let src = shard.val().overlay_key.as_ref().unwrap_or(&self.node_key).id();
+        let peers = AdnlPeers::with_keys(src.clone(), dst.clone());
         rldp.query(data, max_answer_size, &peers, roundtrip_adnl, roundtrip_rldp).await
     }
 
@@ -1161,18 +1182,22 @@ impl OverlayNode {
     }
 
     fn sign_local_node(&self, overlay_id: &Arc<OverlayShortId>) -> Result<Node> {
+        let shard = self.shards.get(overlay_id).ok_or_else(
+            || error!("Signing local node for unknown overlay {}", overlay_id)
+        )?;
+        let key = shard.val().overlay_key.as_ref().unwrap_or(&self.node_key);
         let version = Version::get();
         let local_node = NodeToSign {
             id: AdnlShortId {
-                id: ton::int256(self.node_key.id().data().clone())
+                id: ton::int256(key.id().data().clone())
             },
             overlay: ton::int256(overlay_id.data().clone()),
             version 
         }.into_boxed();     
         let local_node = Node {
-            id: self.node_key.into_tl_public_key()?,
+            id: key.into_tl_public_key()?,
             overlay: ton::int256(overlay_id.data().clone()),
-            signature: ton::bytes(self.node_key.sign(&serialize(&local_node)?)?.to_vec()),
+            signature: ton::bytes(key.sign(&serialize(&local_node)?)?.to_vec()),
             version
         };     
         Ok(local_node)
@@ -1245,12 +1270,24 @@ impl Subscriber for OverlayNode {
         }
     }
 
-    async fn try_consume_query(&self, object: TLObject) -> Result<QueryResult> {
-        log::error!(target: TARGET, "try_consume_query OVERLAY {:?}", object);
+    async fn try_consume_query(
+        &self, 
+        object: TLObject, 
+        peers: &AdnlPeers
+    ) -> Result<QueryResult> {
+        log::error!(
+            target: TARGET, 
+            "try_consume_query OVERLAY {:?} from {}", 
+            object, peers.other()
+        );
         Ok(QueryResult::Rejected(object))                                    
     }    
 
-    async fn try_consume_query_bundle(&self, mut objects: Vec<TLObject>) -> Result<QueryResult> {    
+    async fn try_consume_query_bundle(
+        &self, 
+        mut objects: Vec<TLObject>,
+        peers: &AdnlPeers
+    ) -> Result<QueryResult> {    
         if objects.len() != 2 {
             return Ok(QueryResult::RejectedBundle(objects))
         }
@@ -1282,7 +1319,7 @@ impl Subscriber for OverlayNode {
         } else {
             fail!("No consumer for message in overlay {}", overlay_id)
         };
-        match consumer.val().try_consume_query(object).await {
+        match consumer.val().try_consume_query(object, peers).await {
             Err(msg) => fail!("Unsupported query, overlay: {}, query: {}", overlay_id, msg),
             r => r
         }
