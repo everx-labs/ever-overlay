@@ -522,8 +522,9 @@ impl OverlayShard {
             src_key.id().data().clone()
         };
 
+        let bcast_id = get256(&bcast.data_hash);
         let signature = Self::calc_fec_part_to_sign(
-            get256(&bcast.data_hash),
+            bcast_id,
             bcast.data_size, 
             bcast.date,
             bcast.flags,
@@ -538,7 +539,20 @@ impl OverlayShard {
             if ret.len() != bcast.data_size as usize {
                 fail!("Expected {} bytes, but received {}", bcast.data_size, ret.len())
             } else {
-                log::trace!(target: TARGET, "Received overlay broadcast, {} bytes", ret.len()) 
+                let test_id = sha2::Sha256::digest(&ret);
+                if test_id.as_slice() != bcast_id {
+                    fail!(
+                        "Expected {} broadcast hash, but received {}", 
+                        base64::encode(test_id.as_slice()), 
+                        base64::encode(bcast_id)
+                    )
+                }
+                log::trace!(
+                    target: TARGET, 
+                    "Received overlay broadcast {} ({} bytes)", 
+                    base64::encode(bcast_id), 
+                    ret.len()
+                ) 
             }
             if let Some(source) = source.take() {
                 Ok(Some((ret, source)))
