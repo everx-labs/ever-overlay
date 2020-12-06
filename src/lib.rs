@@ -1342,6 +1342,8 @@ impl OverlayNode {
                         while shard.purge_count.load(Ordering::Relaxed) > Self::MAX_BROADCAST_LOG {
                             if let Some(bcast_id) = shard.purge_broadcasts.pop() {
                                 shard.past_broadcasts.remove(&bcast_id);
+                                #[cfg(feature = "trace")]
+                                shard.stats_per_transfer.remove(&bcast_id);
                             }
                             shard.purge_count.fetch_sub(1, Ordering::Relaxed);
                         }
