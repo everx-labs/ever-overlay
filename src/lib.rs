@@ -463,7 +463,7 @@ impl OverlayShard {
             }
         );
         Ok(())
-
+        
     }
 
     async fn distribute_broadcast(
@@ -484,14 +484,26 @@ impl OverlayShard {
         let mut peers: Option<AdnlPeers> = None;
         for neighbour in neighbours.iter() {
             #[cfg(feature = "trace")]
-            self.update_stats(neighbour, tag)?;
+            if let Err(e) = self.update_stats(neighbour, tag) {
+                log::warn!(
+                    target: TARGET,
+                    "Cannot update statistics in overlay {} for {} during broadcast: {}",
+                    self.overlay_id, neighbour, e
+                )
+            }
             let peers = if let Some(peers) = &mut peers {
                 peers.set_other(neighbour.clone());
                 peers
             } else {
                 peers.get_or_insert_with(|| AdnlPeers::with_keys(key.clone(), neighbour.clone()))
             };
-            self.adnl.send_custom(data, peers).await?;
+            if let Err(e) = self.adnl.send_custom(data, peers).await {
+                log::warn!(
+                    target: TARGET,
+                    "Broadcast {} bytes to overlay {}, wasn't send to {}: {}",
+                    data.len(), self.overlay_id, neighbour, e
+                )
+            }
         }
         Ok(())
     }
