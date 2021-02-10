@@ -398,6 +398,18 @@ impl OverlayShard {
         };
         let max_seqno = (data_size / transfer.encoder.params().symbol_size as u32 + 1) * 2;
 
+        #[cfg(feature = "trace")]
+        if data.len() >= 4 {
+            log::info!(
+                target: TARGET,
+                "Broadcast trace: send FEC {} {} bytes, tag {:x} to overlay {}",
+                base64::encode(&bcast_id),  
+                data.len(),
+                u32::from_le_bytes([data[0], data[1], data[2], data[3]]),
+                overlay_shard.overlay_id
+            );
+        }
+
         tokio::spawn(
             async move {
                 while transfer.seqno <= max_seqno {
@@ -497,6 +509,17 @@ impl OverlayShard {
             } else {
                 peers.get_or_insert_with(|| AdnlPeers::with_keys(key.clone(), neighbour.clone()))
             };
+            #[cfg(feature = "trace")]
+            if data.len() >= 4 {
+                log::info!(
+                    target: TARGET,
+                    "Broadcast trace: distribute {} bytes, tag {:x} to overlay {}, peer {}",
+                    data.len(),
+                    u32::from_le_bytes([data[0], data[1], data[2], data[3]]),
+                    self.overlay_id,
+                    peers.other()
+                );
+            }
             if let Err(e) = self.adnl.send_custom(data, peers).await {
                 log::warn!(
                     target: TARGET,
@@ -635,6 +658,17 @@ impl OverlayShard {
         } else {
             return Ok(());
         };
+        #[cfg(feature = "trace")]
+        if raw_data.len() >= 4 {
+            log::info!(
+                target: TARGET,
+                "Broadcast trace: recv ordinary {} {} bytes, tag {:x} to overlay {}",
+                base64::encode(&bcast_id),  
+                raw_data.len(),
+                u32::from_le_bytes([raw_data[0], raw_data[1], raw_data[2], raw_data[3]]),
+                overlay_shard.overlay_id
+            );
+        }
         src_key.verify(&signature, &bcast.signature.0)?;
         let ton::bytes(data) = bcast.data;
         log::trace!(target: TARGET, "Received overlay broadcast, {} bytes", data.len());
@@ -660,6 +694,17 @@ impl OverlayShard {
         peers: &AdnlPeers 
     ) -> Result<()> {
         let bcast_id = get256(&bcast.data_hash);
+        #[cfg(feature = "trace")]
+        if raw_data.len() >= 4 {
+            log::info!(
+                target: TARGET,
+                "Broadcast trace: recv FEC {} {} bytes, tag {:x} to overlay {}",
+                base64::encode(bcast_id),  
+                raw_data.len(),
+                u32::from_le_bytes([raw_data[0], raw_data[1], raw_data[2], raw_data[3]]),
+                overlay_shard.overlay_id
+            );
+        }
         #[cfg(feature = "trace")]
         let stats = if let Some(stats) = overlay_shard.stats_per_transfer.get(bcast_id) {
             stats
@@ -755,6 +800,17 @@ impl OverlayShard {
         }.into_boxed();
         let signature = key.sign(&serialize(&to_sign)?)?;
 */
+        #[cfg(feature = "trace")]
+        if data.len() >= 4 {
+            log::info!(
+                target: TARGET,
+                "Broadcast trace: send ordinary {} {} bytes, tag {:x} to overlay {}",
+                base64::encode(&bcast_id),  
+                data.len(),
+                u32::from_le_bytes([data[0], data[1], data[2], data[3]]),
+                self.overlay_id
+            );
+        }
         let signature = source.sign(&signature)?;
         let bcast = BroadcastOrd {
             src: source.into_tl_public_key()?,
