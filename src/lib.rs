@@ -208,6 +208,7 @@ struct OverlayShard {
     query_prefix: Vec<u8>,
     random_peers: AddressCache,
     received_catchain: Option<Arc<CatchainReceiver>>,
+    received_peers: Arc<BroadcastReceiver<Vec<Node>>>,
     received_rawbytes: Arc<BroadcastReceiver<(Vec<u8>, Arc<KeyId>)>>,
     transfers_fec: lockfree::map::Map<BroadcastId, RecvTransferFec>,
     #[cfg(feature = "trace")]
@@ -1332,6 +1333,17 @@ impl OverlayNode {
         )?.pop().await
     }
 
+    /// Wait for peers
+    pub async fn wait_for_peers(
+        &self, 
+        overlay_id: &Arc<OverlayShortId>
+    ) -> Result<Vec<Node>> {
+        let shard = self.shards.get(overlay_id).ok_or_else(
+            || error!("Waiting for peers in unknown overlay {}", overlay_id)
+        )?;
+        shard.val().received_peers.pop().await
+    }
+
     async fn add_overlay(
         &self, 
         overlay_id: &Arc<OverlayShortId>, 
@@ -1375,6 +1387,13 @@ impl OverlayNode {
                     query_prefix: serialize(&query_prefix)?,
                     random_peers: AddressCache::with_limit(Self::MAX_SHARD_PEERS),
                     received_catchain,
+                    received_peers: Arc::new(
+                        BroadcastReceiver {
+                            data: lockfree::queue::Queue::new(),
+                            subscribers: lockfree::queue::Queue::new(),
+                            synclock: AtomicU32::new(0)
+                        }
+                    ),
                     received_rawbytes: Arc::new(
                         BroadcastReceiver {
                             data: lockfree::queue::Queue::new(),
@@ -1480,7 +1499,8 @@ impl OverlayNode {
         query: GetRandomPeers
     ) -> Result<Nodes> {
         log::trace!(target: TARGET, "Got random peers request");
-        self.process_random_peers(&shard.overlay_id, query.peers)?;
+        let peers = self.process_random_peers(&shard.overlay_id, query.peers)?;
+        BroadcastReceiver::push(&shard.received_peers, peers); 
         self.prepare_random_peers(shard)
     }
 
