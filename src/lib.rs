@@ -46,6 +46,7 @@ use ton_api::BoxedSerialize;
 use ton_types::{error, fail, Result};
 
 const TARGET: &str = "overlay";
+const TARGET_BROADCAST: &str = "overlay_broadcast";
 
 pub fn build_overlay_node_info(
     overlay: &Arc<OverlayShortId>,  
@@ -748,7 +749,7 @@ impl OverlayShard {
             }
         };
         let transfer = transfer.val();
-        if !transfer.history.update(bcast.seqno as u64).await? {
+        if !transfer.history.update(bcast.seqno as u64, TARGET_BROADCAST).await? {
             return Ok(())
         }
         #[cfg(feature = "trace")]
