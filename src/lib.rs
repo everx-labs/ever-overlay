@@ -315,21 +315,22 @@ impl OverlayShard {
         let mut decoder = RaptorqDecoder::with_params(fec_type.as_ref().clone());
         let overlay_shard_wait = overlay_shard_recv.clone();
         let bcast_id_wait = bcast_id_recv.clone();
+        let source = KeyOption::from_tl_public_key(&bcast.src)?.id().clone();
+        let source_recv = source.clone();
         
         tokio::spawn(
             async move {
-                let mut source = None;
                 while let Some(bcast) = reader.recv().await {
-                    match Self::process_fec_broadcast(&mut decoder, &mut source, &bcast) {
+                    match Self::process_fec_broadcast(&mut decoder, &bcast) {
                         Err(err) => log::warn!(  
                             target: TARGET, 
                             "Error when receiving overlay {} broadcast: {}",
                             overlay_shard_recv.overlay_id,
                             err
                         ),
-                        Ok(Some((data, source))) => BroadcastReceiver::push(
+                        Ok(Some(data)) => BroadcastReceiver::push(
                             &overlay_shard_recv.received_rawbytes, 
-                            (data, source)
+                            (data, source_recv)
                         ),
                         Ok(None) => continue
                     } 
@@ -350,7 +351,7 @@ impl OverlayShard {
         tokio::spawn(
             async move {
                 loop {
-                    tokio::time::delay_for(
+                    tokio::time::sleep(
                         Duration::from_millis(Self::TIMEOUT_BROADCAST * 100)
                     ).await;
                     match overlay_shard_wait.transfers_fec.get(&bcast_id_wait) {
@@ -370,6 +371,7 @@ impl OverlayShard {
             completed: AtomicBool::new(false),
             history: PeerHistory::new(),
             sender,
+            source,
             updated_at: UpdatedAt::new()
         };
         Ok(ret)
@@ -403,7 +405,7 @@ impl OverlayShard {
         #[cfg(feature = "trace")]
         if data.len() >= 4 {
             log::info!(
-                target: TARGET,
+                target: TARGET_BROADCAST,
                 "Broadcast trace: send FEC {} {} bytes, tag {:08x} to overlay {}",
                 base64::encode(&bcast_id),  
                 data.len(),
@@ -434,7 +436,7 @@ impl OverlayShard {
                             return;
                         }
                     }
-                    tokio::time::delay_for(Duration::from_millis(Self::SPINNER)).await;            
+                    tokio::time::sleep(Duration::from_millis(Self::SPINNER)).await;            
                 }   
             }
         );
@@ -525,7 +527,7 @@ impl OverlayShard {
         }
         #[cfg(feature = "trace")]
         log::info!(
-            target: TARGET,
+            target: TARGET_BROADCAST,
             "Broadcast trace: distributed {} bytes to overlay {}, peers {:?}",
             data.len(),
             self.overlay_id,
@@ -576,9 +578,8 @@ impl OverlayShard {
 
     fn process_fec_broadcast(
         decoder: &mut RaptorqDecoder,
-        source: &mut Option<Arc<KeyId>>,
         bcast: &Box<BroadcastFec>
-    ) -> Result<Option<(Vec<u8>, Arc<KeyId>)>> {
+    ) -> Result<Option<Vec<u8>>> {
            
         let fec_type = if let FecType::Fec_RaptorQ(fec_type) = &bcast.fec {
             fec_type
@@ -587,13 +588,6 @@ impl OverlayShard {
         };
 
         let src_key = KeyOption::from_tl_public_key(&bcast.src)?;
-        if let Some(source) = source {
-            if source != src_key.id() {
-                fail!("Same broadcast but parts from different sources")
-            }
-        } else {
-            source.replace(src_key.id().clone());
-        } 
         let src = if (bcast.flags & Self::FLAG_BCAST_ANY_SENDER) != 0 {
             [0u8; 32]
         } else {                           
@@ -632,11 +626,7 @@ impl OverlayShard {
                     ret.len()
                 ) 
             }
-            if let Some(source) = source.take() {
-                Ok(Some((ret, source)))
-            } else {
-                fail!("Broadcast without source")
-            }
+            Ok(Some(ret))
         } else {
             Ok(None)
         }
@@ -667,7 +657,7 @@ impl OverlayShard {
         #[cfg(feature = "trace")]
         if data.len() >= 4 {
             log::info!(
-                target: TARGET,
+                target: TARGET_BROADCAST,
                 "Broadcast trace: recv ordinary {} {} bytes, tag {:08x} to overlay {}",
                 base64::encode(&bcast_id),  
                 data.len(),
@@ -699,7 +689,7 @@ impl OverlayShard {
         let bcast_id = get256(&bcast.data_hash);
         #[cfg(feature = "trace")]
         log::info!(
-            target: TARGET,
+            target: TARGET_BROADCAST,
             "Broadcast trace: recv FEC {} {} bytes to overlay {}",
             base64::encode(bcast_id),  
             raw_data.len(),
@@ -749,6 +739,14 @@ impl OverlayShard {
             }
         };
         let transfer = transfer.val();
+        if &transfer.source != KeyOption::from_tl_public_key(&bcast.src)?.id() {
+            log::warn!(
+                target: TARGET, 
+                "Same broadcast {} but parts from different sources",
+                base64::encode(bcast_id)            
+            );
+            return Ok(())
+        }
         if !transfer.history.update(bcast.seqno as u64, TARGET_BROADCAST).await? {
             return Ok(())
         }
@@ -803,7 +801,7 @@ impl OverlayShard {
         #[cfg(feature = "trace")]
         if data.len() >= 4 {
             log::info!(
-                target: TARGET,
+                target: TARGET_BROADCAST,
                 "Broadcast trace: send ordinary {} {} bytes, tag {:08x} to overlay {}",
                 base64::encode(&bcast_id),  
                 data.len(),
@@ -940,6 +938,7 @@ struct RecvTransferFec {
     completed: AtomicBool,
     history: PeerHistory,
     sender: tokio::sync::mpsc::UnboundedSender<Box<BroadcastFec>>,
+    source: Arc<KeyId>,
     updated_at: UpdatedAt
 }
 
@@ -1006,13 +1005,14 @@ impl OverlayNode {
     }
 
     /// Add private_overlay
-    pub async fn add_private_overlay(
+    pub fn add_private_overlay(
         &self, 
+        runtime: Option<tokio::runtime::Handle>,
         overlay_id: &Arc<OverlayShortId>,
         overlay_key: &Arc<KeyOption>, 
         peers: &Vec<Arc<KeyId>>
     ) -> Result<bool> {
-        if self.add_overlay(overlay_id, Some(overlay_key.clone())).await? {
+        if self.add_overlay(runtime, overlay_id, Some(overlay_key.clone()))? {
             let shard = self.shards.get(overlay_id).ok_or_else(
                 || error!("Cannot add the private overlay {}", overlay_id)
             )?;
@@ -1099,8 +1099,12 @@ impl OverlayNode {
     }
 
     /// Add shard
-    pub async fn add_shard(&self, overlay_id: &Arc<OverlayShortId>) -> Result<bool> {
-        self.add_overlay(overlay_id, None).await
+    pub fn add_shard(
+        &self, 
+        runtime: Option<tokio::runtime::Handle>,
+        overlay_id: &Arc<OverlayShortId>
+    ) -> Result<bool> {
+        self.add_overlay(runtime, overlay_id, None)
     }
 
     /// Broadcast message 
@@ -1189,7 +1193,9 @@ impl OverlayNode {
         if shard.random_peers.contains(peer) {
             shard.update_random_peers(Self::MAX_SHARD_PEERS)?
         }
-        self.adnl.delete_peer(self.node_key.id(), peer)
+        // DO NOT DELETE from ADNL, because it may be shared between overlays
+        // self.adnl.delete_peer(self.node_key.id(), peer)
+        Ok(true)
     }
 
     /// Get query prefix
@@ -1287,10 +1293,9 @@ impl OverlayNode {
         dst: &Arc<KeyId>, 
         data: &[u8],
         max_answer_size: Option<i64>,
-        roundtrip_adnl: Option<u64>,
-        roundtrip_rldp: Option<u64>,
+        roundtrip: Option<u64>,
         overlay_id: &Arc<OverlayShortId>
-    ) -> Result<Option<Vec<u8>>> {
+    ) -> Result<(Option<Vec<u8>>, u64)> {
         let shard = self.shards.get(overlay_id).ok_or_else(
             || error!("Sending RLDP query to unknown overlay {}", overlay_id)
         )?;
@@ -1301,7 +1306,7 @@ impl OverlayNode {
             let tag = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
             shard.val().update_stats(dst, tag)?;
         }
-        rldp.query(data, max_answer_size, &peers, roundtrip_adnl, roundtrip_rldp).await
+        rldp.query(data, max_answer_size, &peers, roundtrip).await
     }
 
     /// Statistics
@@ -1347,8 +1352,9 @@ impl OverlayNode {
         shard.val().received_peers.pop().await
     }
 
-    async fn add_overlay(
+    fn add_overlay(
         &self, 
+        runtime: Option<tokio::runtime::Handle>,
         overlay_id: &Arc<OverlayShortId>, 
         overlay_key: Option<Arc<KeyOption>>
     ) -> Result<bool> {
@@ -1425,7 +1431,8 @@ impl OverlayNode {
                 || error!("Cannot add overlay {}", overlay_id)
             )?;
             let shard = shard.val().clone();
-            tokio::spawn(
+            let handle = runtime.unwrap_or_else(|| tokio::runtime::Handle::current());
+            handle.spawn(
                 async move {
                     let mut timeout_peers = 0;
                     while Arc::strong_count(&shard) > 1 {
@@ -1449,7 +1456,7 @@ impl OverlayNode {
                             }
                             timeout_peers = 0;
                         }
-                        tokio::time::delay_for(Duration::from_millis(Self::TIMEOUT_GC)).await;
+                        tokio::time::sleep(Duration::from_millis(Self::TIMEOUT_GC)).await;
                     }
                 }
             );
@@ -1601,7 +1608,7 @@ impl Subscriber for OverlayNode {
         object: TLObject, 
         peers: &AdnlPeers
     ) -> Result<QueryResult> {
-        log::error!(
+        log::warn!(
             target: TARGET, 
             "try_consume_query OVERLAY {:?} from {}", 
             object, peers.other()
