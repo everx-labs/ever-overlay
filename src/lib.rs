@@ -217,9 +217,13 @@ struct OverlayShard {
     #[cfg(feature = "trace")]
     print: AtomicU64,
     #[cfg(feature = "trace")]
-    messages: AtomicU64,
+    messages_recv: AtomicU64,
     #[cfg(feature = "trace")]
-    stats_per_peer: lockfree::map::Map<Arc<KeyId>, lockfree::map::Map<u32, AtomicU64>>,
+    messages_send: AtomicU64,
+    #[cfg(feature = "trace")]
+    stats_per_peer_recv: lockfree::map::Map<Arc<KeyId>, lockfree::map::Map<u32, AtomicU64>>,
+    #[cfg(feature = "trace")]
+    stats_per_peer_send: lockfree::map::Map<Arc<KeyId>, lockfree::map::Map<u32, AtomicU64>>,
     #[cfg(feature = "trace")]
     stats_per_transfer: lockfree::map::Map<BroadcastId, TransferStats>
 }
@@ -502,7 +506,7 @@ impl OverlayShard {
         let mut addrs = Vec::new();
         for neighbour in neighbours.iter() {
             #[cfg(feature = "trace")]
-            if let Err(e) = self.update_stats(neighbour, tag) {
+            if let Err(e) = self.update_stats(neighbour, tag, true) {
                 log::warn!(
                     target: TARGET,
                     "Cannot update statistics in overlay {} for {} during broadcast: {}",
@@ -852,14 +856,19 @@ impl OverlayShard {
 
     #[cfg(feature = "trace")]
     fn print_stats(&self) {
-        let messages = self.messages.load(Ordering::Relaxed);      
         let elapsed = self.start.elapsed().as_secs();
+        if elapsed == 0 {
+            // Too early to print stats
+            return
+        }
+        let messages_recv = self.messages_recv.load(Ordering::Relaxed);
+        let messages_send = self.messages_send.load(Ordering::Relaxed);
         log::info!(
             target: TARGET,
             "------- OVERLAY STAT send {}: {} messages, {} messages/sec average load",
-            self.overlay_id, messages, messages / elapsed
+            self.overlay_id, messages_send, messages_send / elapsed
         );
-        for dst in self.stats_per_peer.iter() {
+        for dst in self.stats_per_peer_send.iter() {
             log::info!(
                 target: TARGET, 
                 "  -- OVERLAY STAT send {} to {}", 
@@ -870,6 +879,26 @@ impl OverlayShard {
                 log::info!(
                     target: TARGET, 
                     "  OVERLAY STAT send {} tag {:x}: {}, {} per sec average load", 
+                    self.overlay_id, tag.key(), count, count / elapsed
+                );
+            }
+        }
+        log::info!(
+            target: TARGET,
+            "------- OVERLAY STAT recv {}: {} messages, {} messages/sec average load",
+            self.overlay_id, messages_recv, messages_recv / elapsed
+        );
+        for dst in self.stats_per_peer_recv.iter() {
+            log::info!(
+                target: TARGET, 
+                "  -- OVERLAY STAT recv {} from {}", 
+                self.overlay_id, dst.key()
+            );
+            for tag in dst.val().iter() {
+                let count = tag.val().load(Ordering::Relaxed);
+                log::info!(
+                    target: TARGET, 
+                    "  OVERLAY STAT recv {} tag {:x}: {}, {} per sec average load", 
                     self.overlay_id, tag.key(), count, count / elapsed
                 );
             }
@@ -887,16 +916,21 @@ impl OverlayShard {
     }
 
     #[cfg(feature = "trace")]
-    fn update_stats(&self, dst: &Arc<KeyId>, tag: u32) -> Result<()> {
-        let stats = if let Some(stats) = self.stats_per_peer.get(dst) {
+    fn update_stats(&self, dst: &Arc<KeyId>, tag: u32, is_send: bool) -> Result<()> {
+        let stats = if is_send {
+            &self.stats_per_peer_send
+        } else {
+            &self.stats_per_peer_recv
+        };
+        let stats = if let Some(stats) = stats.get(dst) {
             stats 
         } else {
             add_object_to_map(
-                &self.stats_per_peer,
+                stats,
                 dst.clone(),
                 || Ok(lockfree::map::Map::new())
             )?;
-            if let Some(stats) = self.stats_per_peer.get(dst) {
+            if let Some(stats) = stats.get(dst) {
                 stats
             } else {
                 fail!(
@@ -923,7 +957,11 @@ impl OverlayShard {
             }
         };
         stats.val().fetch_add(1, Ordering::Relaxed);
-        self.messages.fetch_add(1, Ordering::Relaxed);      
+        if is_send {
+            self.messages_send.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.messages_recv.fetch_add(1, Ordering::Relaxed);
+        }
         let elapsed = self.start.elapsed().as_secs();
         if elapsed > self.print.load(Ordering::Relaxed) {
             self.print.store(elapsed + 5, Ordering::Relaxed);
@@ -1253,7 +1291,7 @@ impl OverlayNode {
         #[cfg(feature = "trace")]
         if data.len() >= 4 {
             let tag = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-            shard.update_stats(dst, tag)?;
+            shard.update_stats(dst, tag, true)?;
         }
         let mut buf = shard.message_prefix.clone();
         buf.extend_from_slice(data);
@@ -1276,7 +1314,7 @@ impl OverlayNode {
         let peers = AdnlPeers::with_keys(src.clone(), dst.clone());
         #[cfg(feature = "trace")] {
             let (tag, _) = query.serialize_boxed();
-            shard.update_stats(dst, tag.0)?;
+            shard.update_stats(dst, tag.0, true)?;
         }
         self.adnl.query_with_prefix(
             Some(&shard.query_prefix), 
@@ -1301,10 +1339,18 @@ impl OverlayNode {
         )?;
         let src = shard.val().overlay_key.as_ref().unwrap_or(&self.node_key).id();
         let peers = AdnlPeers::with_keys(src.clone(), dst.clone());
-        #[cfg(feature = "trace")]
-        if data.len() >= 4 {
-            let tag = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-            shard.val().update_stats(dst, tag)?;
+        #[cfg(feature = "trace")] {
+            let tag = if data.len() >= 4 {
+                let mut tag = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+                // Uncover Overlay.Query internal message if possible
+                if (tag == 0xCCFD8443) && (data.len() >= 40) {
+                    tag = u32::from_le_bytes([data[36], data[37], data[38], data[39]]);
+                }
+                tag
+            } else {
+                0
+            };
+            shard.val().update_stats(dst, tag, true)?;
         }
         rldp.query(data, max_answer_size, &peers, roundtrip).await
     }
@@ -1416,9 +1462,13 @@ impl OverlayNode {
                     #[cfg(feature = "trace")]
                     print: AtomicU64::new(0),
                     #[cfg(feature = "trace")]
-                    messages: AtomicU64::new(0),
+                    messages_recv: AtomicU64::new(0),
+                    #[cfg(feature = "trace")]
+                    messages_send: AtomicU64::new(0),
                     #[cfg(feature = "trace")]  
-                    stats_per_peer: lockfree::map::Map::new(),
+                    stats_per_peer_recv: lockfree::map::Map::new(),
+                    #[cfg(feature = "trace")]  
+                    stats_per_peer_send: lockfree::map::Map::new(),
                     #[cfg(feature = "trace")]  
                     stats_per_transfer: lockfree::map::Map::new()
                 };
@@ -1563,6 +1613,10 @@ impl Subscriber for OverlayNode {
         } else {
             fail!("Message to unknown overlay {}", overlay_id)
         };
+        #[cfg(feature = "trace")] {
+            let (tag, _) = bundle[0].serialize_boxed();
+            overlay_shard.val().update_stats(peers.other(), tag.0, false)?;
+        }
         if bundle.len() == 2 {
             // Private overlay
             let catchain_update = match bundle.remove(0).downcast::<CatchainBlockUpdateBoxed>() {
@@ -1634,6 +1688,11 @@ impl Subscriber for OverlayNode {
                 return Ok(QueryResult::RejectedBundle(objects))
             }
         };                                
+        #[cfg(feature = "trace")] 
+        if let Some(overlay_shard) = self.shards.get(&overlay_id) {                                                      
+            let (tag, _) = objects[0].serialize_boxed();
+            overlay_shard.val().update_stats(peers.other(), tag.0, false)?;
+        }
         let object = match objects.remove(0).downcast::<GetRandomPeers>() {
             Ok(query) => {                
                 let overlay_shard = if let Some(overlay_shard) = self.shards.get(&overlay_id) {                                                      
