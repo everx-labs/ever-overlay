@@ -230,6 +230,7 @@ struct OverlayShard {
 
 impl OverlayShard {
 
+    const SIZE_BROADCAST_WAVE: u32 = 300;
     const SPINNER: u64 = 10;              // Milliseconds
     const TIMEOUT_BROADCAST: u64 = 15;    // Seconds
     const FLAG_BCAST_ANY_SENDER: i32 = 1;
@@ -404,7 +405,7 @@ impl OverlayShard {
             encoder: RaptorqEncoder::with_data(data),
             seqno: 0
         };
-        let max_seqno = (data_size / transfer.encoder.params().symbol_size as u32 + 1) * 2;
+        let max_seqno = (data_size / transfer.encoder.params().symbol_size as u32 + 1) * 3 / 2;
 
         #[cfg(feature = "trace")]
         if data.len() >= 4 {
@@ -421,7 +422,7 @@ impl OverlayShard {
         tokio::spawn(
             async move {
                 while transfer.seqno <= max_seqno {
-                    for _ in 0..4 {
+                    for _ in 0..Self::SIZE_BROADCAST_WAVE {
                         let result = overlay_shard_clone
                             .prepare_fec_broadcast(&mut transfer, &source)
                             .and_then(
@@ -437,7 +438,10 @@ impl OverlayShard {
                                 overlay_shard_clone.overlay_id,
                                 err
                             );
-                            return;
+                            return
+                        }
+                        if transfer.seqno > max_seqno {
+                            break
                         }
                     }
                     tokio::time::sleep(Duration::from_millis(Self::SPINNER)).await;            
