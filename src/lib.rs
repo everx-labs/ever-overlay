@@ -9,7 +9,7 @@ use adnl::{
 use rldp::{RaptorqDecoder, RaptorqEncoder, RldpNode};
 use sha2::Digest;
 use std::{sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering}}, time::Duration};
-#[cfg(feature = "trace")]
+#[cfg(feature = "telemetry")]
 use std::{sync::atomic::AtomicU64, time::Instant};
 use ton_api::{
     IntoBoxed, 
@@ -41,7 +41,7 @@ use ton_api::{
         }
     }
 };
-#[cfg(feature = "trace")]
+#[cfg(feature = "telemetry")]
 use ton_api::BoxedSerialize;
 use ton_types::{error, fail, Result};
 
@@ -187,7 +187,7 @@ type CatchainReceiver = BroadcastReceiver<
     (CatchainBlockUpdate, ValidatorSessionBlockUpdate, Arc<KeyId>)
 >;
 
-#[cfg(feature = "trace")]
+#[cfg(feature = "telemetry")]
 struct TransferStats {
     income: AtomicU64,
     passed: AtomicU64,
@@ -212,19 +212,19 @@ struct OverlayShard {
     received_peers: Arc<BroadcastReceiver<Vec<Node>>>,
     received_rawbytes: Arc<BroadcastReceiver<(Vec<u8>, Arc<KeyId>)>>,
     transfers_fec: lockfree::map::Map<BroadcastId, RecvTransferFec>,
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "telemetry")]
     start: Instant,
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "telemetry")]
     print: AtomicU64,
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "telemetry")]
     messages_recv: AtomicU64,
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "telemetry")]
     messages_send: AtomicU64,
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "telemetry")]
     stats_per_peer_recv: lockfree::map::Map<Arc<KeyId>, lockfree::map::Map<u32, AtomicU64>>,
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "telemetry")]
     stats_per_peer_send: lockfree::map::Map<Arc<KeyId>, lockfree::map::Map<u32, AtomicU64>>,
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "telemetry")]
     stats_per_transfer: lockfree::map::Map<BroadcastId, TransferStats>
 }
 
@@ -232,7 +232,7 @@ impl OverlayShard {
 
     const SIZE_BROADCAST_WAVE: u32 = 300;
     const SPINNER: u64 = 10;              // Milliseconds
-    const TIMEOUT_BROADCAST: u64 = 15;    // Seconds
+    const TIMEOUT_BROADCAST: u64 = 300;   // Seconds
     const FLAG_BCAST_ANY_SENDER: i32 = 1;
 
     fn calc_broadcast_id(&self, data: &[u8]) -> Result<Option<BroadcastId>> {
@@ -407,7 +407,7 @@ impl OverlayShard {
         };
         let max_seqno = (data_size / transfer.encoder.params().symbol_size as u32 + 1) * 3 / 2;
 
-        #[cfg(feature = "trace")]
+        #[cfg(feature = "telemetry")]
         if data.len() >= 4 {
             log::info!(
                 target: TARGET_BROADCAST,
@@ -451,7 +451,7 @@ impl OverlayShard {
 
         let overlay_shard = overlay_shard.clone();
         let overlay_key = overlay_key.clone();
-        #[cfg(feature = "trace")]
+        #[cfg(feature = "telemetry")]
         let tag = if data.len() >= 4 {
             u32::from_le_bytes([data[0], data[1], data[2], data[3]])
         } else {
@@ -467,7 +467,7 @@ impl OverlayShard {
                         &buf, 
                         &overlay_key,
                         &neighbours, 
-                        #[cfg(feature = "trace")]
+                        #[cfg(feature = "telemetry")]
                         tag
                     ).await {
                         log::warn!(
@@ -495,7 +495,7 @@ impl OverlayShard {
         data: &[u8], 
         key: &Arc<KeyId>,
         neighbours: &Vec<Arc<KeyId>>,
-        #[cfg(feature = "trace")]
+        #[cfg(feature = "telemetry")]
         tag: u32
     ) -> Result<()> {   
         log::trace!(
@@ -506,10 +506,10 @@ impl OverlayShard {
             neighbours.len()
         );
         let mut peers: Option<AdnlPeers> = None;
-        #[cfg(feature = "trace")]
+        #[cfg(feature = "telemetry")]
         let mut addrs = Vec::new();
         for neighbour in neighbours.iter() {
-            #[cfg(feature = "trace")]
+            #[cfg(feature = "telemetry")]
             if let Err(e) = self.update_stats(neighbour, tag, true) {
                 log::warn!(
                     target: TARGET,
@@ -523,7 +523,7 @@ impl OverlayShard {
             } else {
                 peers.get_or_insert_with(|| AdnlPeers::with_keys(key.clone(), neighbour.clone()))
             };
-            #[cfg(feature = "trace")]
+            #[cfg(feature = "telemetry")]
             addrs.push(format!("{}", peers.other()));
             if let Err(e) = self.adnl.send_custom(data, peers).await {
                 log::warn!(
@@ -533,7 +533,7 @@ impl OverlayShard {
                 )
             }
         }
-        #[cfg(feature = "trace")]
+        #[cfg(feature = "telemetry")]
         log::info!(
             target: TARGET_BROADCAST,
             "Broadcast trace: distributed {} bytes to overlay {}, peers {:?}",
@@ -662,7 +662,7 @@ impl OverlayShard {
         src_key.verify(&signature, &bcast.signature.0)?;
         let ton::bytes(data) = bcast.data;
         log::trace!(target: TARGET, "Received overlay broadcast, {} bytes", data.len());
-        #[cfg(feature = "trace")]
+        #[cfg(feature = "telemetry")]
         if data.len() >= 4 {
             log::info!(
                 target: TARGET_BROADCAST,
@@ -680,7 +680,7 @@ impl OverlayShard {
             raw_data, 
             peers.local(),
             &neighbours,
-            #[cfg(feature = "trace")]
+            #[cfg(feature = "telemetry")]
             2
         ).await?;
         overlay_shard.purge_count.fetch_add(1, Ordering::Relaxed);
@@ -695,7 +695,7 @@ impl OverlayShard {
         peers: &AdnlPeers 
     ) -> Result<()> {
         let bcast_id = get256(&bcast.data_hash);
-        #[cfg(feature = "trace")]
+        #[cfg(feature = "telemetry")]
         log::info!(
             target: TARGET_BROADCAST,
             "Broadcast trace: recv FEC {} {} bytes to overlay {}",
@@ -703,7 +703,18 @@ impl OverlayShard {
             raw_data.len(),
             overlay_shard.overlay_id
         );
-        #[cfg(feature = "trace")]
+        let now = Version::get();
+        if bcast.date + Self::TIMEOUT_BROADCAST as i32 * 5 < now {
+            log::warn!(
+                target: TARGET,
+                "Old broadcast {} seconds old from {} in overlay {}",
+                now - bcast.date,
+                peers.other(),
+                overlay_shard.overlay_id
+            );
+            return Ok(())
+        }
+        #[cfg(feature = "telemetry")]
         let stats = if let Some(stats) = overlay_shard.stats_per_transfer.get(bcast_id) {
             stats
         } else {
@@ -722,7 +733,7 @@ impl OverlayShard {
                 || error!("INTERNAL ERROR: Cannot count transfer statistics")
             )?
         };
-        #[cfg(feature = "trace")]
+        #[cfg(feature = "telemetry")]
         stats.val().income.fetch_add(1, Ordering::Relaxed);
         let transfer = if let Some(transfer) = overlay_shard.transfers_fec.get(bcast_id) {
             transfer
@@ -758,21 +769,21 @@ impl OverlayShard {
         if !transfer.history.update(bcast.seqno as u64, TARGET_BROADCAST).await? {
             return Ok(())
         }
-        #[cfg(feature = "trace")]
+        #[cfg(feature = "telemetry")]
         stats.val().passed.fetch_add(1, Ordering::Relaxed);
         if !transfer.completed.load(Ordering::Relaxed) {
             transfer.sender.send(bcast)?;
         }
         transfer.updated_at.refresh();
         let neighbours = overlay_shard.neighbours.random_vec(Some(peers.other()), 5); 
-        #[cfg(feature = "trace")]
+        #[cfg(feature = "telemetry")]
         stats.val().resent.fetch_add(neighbours.len() as u64, Ordering::Relaxed);
         // Transit broadcasts will be traced untagged 
         overlay_shard.distribute_broadcast(
             raw_data, 
             peers.local(),
             &neighbours,
-            #[cfg(feature = "trace")]
+            #[cfg(feature = "telemetry")]
             3
         ).await?;
         Ok(())
@@ -806,7 +817,7 @@ impl OverlayShard {
         }.into_boxed();
         let signature = key.sign(&serialize(&to_sign)?)?;
 */
-        #[cfg(feature = "trace")]
+        #[cfg(feature = "telemetry")]
         if data.len() >= 4 {
             log::info!(
                 target: TARGET_BROADCAST,
@@ -833,7 +844,7 @@ impl OverlayShard {
             &buf, 
             overlay_key,
             &neighbours,
-            #[cfg(feature = "trace")]
+            #[cfg(feature = "telemetry")]
             if data.len() >= 4 {
                 u32::from_le_bytes([data[0], data[1], data[2], data[3]])
             } else {
@@ -858,7 +869,7 @@ impl OverlayShard {
         self.update_neighbours(OverlayNode::MAX_SHARD_NEIGHBOURS)
     }
 
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "telemetry")]
     fn print_stats(&self) {
         let elapsed = self.start.elapsed().as_secs();
         if elapsed == 0 {
@@ -919,7 +930,7 @@ impl OverlayShard {
         }
     }
 
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "telemetry")]
     fn update_stats(&self, dst: &Arc<KeyId>, tag: u32, is_send: bool) -> Result<()> {
         let stats = if is_send {
             &self.stats_per_peer_send
@@ -1292,7 +1303,7 @@ impl OverlayNode {
         let shard = shard.val();
         let src = shard.overlay_key.as_ref().unwrap_or(&self.node_key).id();
         let peers = AdnlPeers::with_keys(src.clone(), dst.clone());
-        #[cfg(feature = "trace")]
+        #[cfg(feature = "telemetry")]
         if data.len() >= 4 {
             let tag = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
             shard.update_stats(dst, tag, true)?;
@@ -1316,7 +1327,7 @@ impl OverlayNode {
         let shard = shard.val();
         let src = shard.overlay_key.as_ref().unwrap_or(&self.node_key).id();
         let peers = AdnlPeers::with_keys(src.clone(), dst.clone());
-        #[cfg(feature = "trace")] {
+        #[cfg(feature = "telemetry")] {
             let (tag, _) = query.serialize_boxed();
             shard.update_stats(dst, tag.0, true)?;
         }
@@ -1343,7 +1354,7 @@ impl OverlayNode {
         )?;
         let src = shard.val().overlay_key.as_ref().unwrap_or(&self.node_key).id();
         let peers = AdnlPeers::with_keys(src.clone(), dst.clone());
-        #[cfg(feature = "trace")] {
+        #[cfg(feature = "telemetry")] {
             let tag = if data.len() >= 4 {
                 let mut tag = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
                 // Uncover Overlay.Query internal message if possible
@@ -1360,7 +1371,7 @@ impl OverlayNode {
     }
 
     /// Statistics
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "telemetry")]
     pub fn stats(&self) {
         for shard in self.shards.iter() {
             shard.val().print_stats()
@@ -1461,19 +1472,19 @@ impl OverlayNode {
                         }
                     ),
                     transfers_fec: lockfree::map::Map::new(),
-                    #[cfg(feature = "trace")]
+                    #[cfg(feature = "telemetry")]
                     start: Instant::now(),
-                    #[cfg(feature = "trace")]
+                    #[cfg(feature = "telemetry")]
                     print: AtomicU64::new(0),
-                    #[cfg(feature = "trace")]
+                    #[cfg(feature = "telemetry")]
                     messages_recv: AtomicU64::new(0),
-                    #[cfg(feature = "trace")]
+                    #[cfg(feature = "telemetry")]
                     messages_send: AtomicU64::new(0),
-                    #[cfg(feature = "trace")]  
+                    #[cfg(feature = "telemetry")]  
                     stats_per_peer_recv: lockfree::map::Map::new(),
-                    #[cfg(feature = "trace")]  
+                    #[cfg(feature = "telemetry")]  
                     stats_per_peer_send: lockfree::map::Map::new(),
-                    #[cfg(feature = "trace")]  
+                    #[cfg(feature = "telemetry")]  
                     stats_per_transfer: lockfree::map::Map::new()
                 };
                 shard.update_neighbours(Self::MAX_SHARD_NEIGHBOURS)?;
@@ -1493,7 +1504,7 @@ impl OverlayNode {
                         while shard.purge_count.load(Ordering::Relaxed) > Self::MAX_BROADCAST_LOG {
                             if let Some(bcast_id) = shard.purge_broadcasts.pop() {
                                 shard.past_broadcasts.remove(&bcast_id);
-                                #[cfg(feature = "trace")]
+                                #[cfg(feature = "telemetry")]
                                 shard.stats_per_transfer.remove(&bcast_id);
                             }
                             shard.purge_count.fetch_sub(1, Ordering::Relaxed);
@@ -1617,7 +1628,7 @@ impl Subscriber for OverlayNode {
         } else {
             fail!("Message to unknown overlay {}", overlay_id)
         };
-        #[cfg(feature = "trace")] {
+        #[cfg(feature = "telemetry")] {
             let (tag, _) = bundle[0].serialize_boxed();
             overlay_shard.val().update_stats(peers.other(), tag.0, false)?;
         }
@@ -1692,7 +1703,7 @@ impl Subscriber for OverlayNode {
                 return Ok(QueryResult::RejectedBundle(objects))
             }
         };                                
-        #[cfg(feature = "trace")] 
+        #[cfg(feature = "telemetry")] 
         if let Some(overlay_shard) = self.shards.get(&overlay_id) {                                                      
             let (tag, _) = objects[0].serialize_boxed();
             overlay_shard.val().update_stats(peers.other(), tag.0, false)?;
