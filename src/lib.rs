@@ -112,6 +112,18 @@ impl <T: Send + 'static> BroadcastReceiver<T> {
 
 }
 
+pub struct BroadcastRecvInfo {
+    pub packets: u32,
+    pub data: Vec<u8>,
+    pub recv_from: Arc<KeyId>
+}
+
+#[derive(Debug, Default)]
+pub struct BroadcastSendInfo {
+    pub packets: u32,
+    pub send_to: u32
+}
+
 pub type OverlayId = [u8; 32];
 pub type OverlayShortId = KeyId;
 pub type PrivateOverlayShortId = KeyId;
@@ -187,6 +199,12 @@ type CatchainReceiver = BroadcastReceiver<
     (CatchainBlockUpdate, ValidatorSessionBlockUpdate, Arc<KeyId>)
 >;
 
+enum OwnedBroadcast {
+    Other,
+    RecvFec(RecvTransferFec),
+    WillBeRecvFec
+}
+
 #[cfg(feature = "telemetry")]
 struct TransferStats {
     income: AtomicU64,
@@ -203,15 +221,14 @@ struct OverlayShard {
     nodes: lockfree::map::Map<Arc<KeyId>, Node>,
     overlay_id: Arc<OverlayShortId>,
     overlay_key: Option<Arc<KeyOption>>,
-    past_broadcasts: lockfree::map::Map<BroadcastId, ()>,
+    owned_broadcasts: lockfree::map::Map<BroadcastId, OwnedBroadcast>,
     purge_broadcasts: lockfree::queue::Queue<BroadcastId>,
-    purge_count: AtomicU32,
+    purge_broadcasts_count: AtomicU32,
     query_prefix: Vec<u8>,
     random_peers: AddressCache,
     received_catchain: Option<Arc<CatchainReceiver>>,
     received_peers: Arc<BroadcastReceiver<Vec<Node>>>,
-    received_rawbytes: Arc<BroadcastReceiver<(Vec<u8>, Arc<KeyId>)>>,
-    transfers_fec: lockfree::map::Map<BroadcastId, RecvTransferFec>,
+    received_rawbytes: Arc<BroadcastReceiver<BroadcastRecvInfo>>,
     #[cfg(feature = "telemetry")]
     start: Instant,
     #[cfg(feature = "telemetry")]
@@ -225,23 +242,25 @@ struct OverlayShard {
     #[cfg(feature = "telemetry")]
     stats_per_peer_send: lockfree::map::Map<Arc<KeyId>, lockfree::map::Map<u32, AtomicU64>>,
     #[cfg(feature = "telemetry")]
-    stats_per_transfer: lockfree::map::Map<BroadcastId, TransferStats>
+    stats_per_transfer: lockfree::map::Map<BroadcastId, TransferStats>,
+    // For debug
+    debug_trace: AtomicU32
 }
 
 impl OverlayShard {
 
-    const SIZE_BROADCAST_WAVE: u32 = 300;
+    const SIZE_BROADCAST_WAVE: u32 = 20;
     const SPINNER: u64 = 10;              // Milliseconds
-    const TIMEOUT_BROADCAST: u64 = 300;   // Seconds
+    const TIMEOUT_BROADCAST: u64 = 100;   // Seconds
     const FLAG_BCAST_ANY_SENDER: i32 = 1;
 
     fn calc_broadcast_id(&self, data: &[u8]) -> Result<Option<BroadcastId>> {
         let bcast_id = sha2::Sha256::digest(data);
         let bcast_id = arrayref::array_ref!(bcast_id.as_slice(), 0, 32);
         let added = add_object_to_map(
-            &self.past_broadcasts,
+            &self.owned_broadcasts,
             bcast_id.clone(),
-            || Ok(())
+            || Ok(OwnedBroadcast::Other)
         )?;
         if !added {
             Ok(None)
@@ -322,10 +341,12 @@ impl OverlayShard {
         let bcast_id_wait = bcast_id_recv.clone();
         let source = KeyOption::from_tl_public_key(&bcast.src)?.id().clone();
         let source_recv = source.clone();
-        
+                
         tokio::spawn(
             async move {
+                let mut packets = 0;
                 while let Some(bcast) = reader.recv().await {
+                    packets += 1; 
                     match Self::process_fec_broadcast(&mut decoder, &bcast) {
                         Err(err) => log::warn!(  
                             target: TARGET, 
@@ -335,17 +356,28 @@ impl OverlayShard {
                         ),
                         Ok(Some(data)) => BroadcastReceiver::push(
                             &overlay_shard_recv.received_rawbytes, 
-                            (data, source_recv)
+                            BroadcastRecvInfo {
+                                packets, 
+                                data, 
+                                recv_from: source_recv
+                            }
                         ),
                         Ok(None) => continue
                     } 
                     break;
                 }   
-                if let Some(transfer) = overlay_shard_recv.transfers_fec.get(&bcast_id_recv) {
-                    transfer.val().completed.store(true, Ordering::Relaxed)
+                if let Some(transfer) = overlay_shard_recv.owned_broadcasts.get(&bcast_id_recv) {
+                    if let OwnedBroadcast::RecvFec(transfer) = transfer.val() {
+                        transfer.completed.store(true, Ordering::Relaxed);
+                    } else {
+                        log::error!(  
+                            target: TARGET, 
+                            "INTERNAL ERROR: recv FEC broadcast {} mismatch in overlay {}",
+                            base64::encode(&bcast_id_recv),
+                            overlay_shard_recv.overlay_id
+                        )
+                    }
                 }
-                overlay_shard_recv.purge_count.fetch_add(1, Ordering::Relaxed);
-                overlay_shard_recv.purge_broadcasts.push(bcast_id_recv);
                 // Graceful close
                 reader.close();
                 while let Some(_) = reader.recv().await { 
@@ -359,16 +391,26 @@ impl OverlayShard {
                     tokio::time::sleep(
                         Duration::from_millis(Self::TIMEOUT_BROADCAST * 100)
                     ).await;
-                    match overlay_shard_wait.transfers_fec.get(&bcast_id_wait) {
+                    match overlay_shard_wait.owned_broadcasts.get(&bcast_id_wait) {
                         Some(transfer) => {
-                            if transfer.val().updated_at.is_expired(Self::TIMEOUT_BROADCAST) {
-                                overlay_shard_wait.transfers_fec.remove(&bcast_id_wait);
-                                break
+                            if let OwnedBroadcast::RecvFec(transfer) = transfer.val() {
+                                if !transfer.updated_at.is_expired(Self::TIMEOUT_BROADCAST) {
+                                    continue
+                                }
+                            } else {
+                                log::error!(  
+                                    target: TARGET, 
+                                    "INTERNAL ERROR: recv FEC broadcast {} mismatch in overlay {}",
+                                    base64::encode(&bcast_id_wait),
+                                    overlay_shard_wait.overlay_id
+                                )
                             }
                         },
-                        _ => break
+                        _ => ()
                     }
+                    break
                 }
+                Self::setup_broadcast_purge(&overlay_shard_wait, bcast_id_wait);
             }
         );
 
@@ -388,7 +430,7 @@ impl OverlayShard {
         data: &[u8], 
         source: &Arc<KeyOption>,
         overlay_key: &Arc<KeyId>
-    ) -> Result<()> {
+    ) -> Result<BroadcastSendInfo> {
 
         let overlay_shard_clone = overlay_shard.clone();
         let source = source.clone();
@@ -398,7 +440,7 @@ impl OverlayShard {
         let bcast_id = if let Some(bcast_id) = overlay_shard.calc_broadcast_id(data)? {
             bcast_id
         } else {
-            return Ok(())
+            return Ok(BroadcastSendInfo::default())
         };
         let mut transfer = SendTransferFec {
             bcast_id: bcast_id.clone(),
@@ -406,7 +448,7 @@ impl OverlayShard {
             seqno: 0
         };
         let max_seqno = (data_size / transfer.encoder.params().symbol_size as u32 + 1) * 3 / 2;
-
+        
         #[cfg(feature = "telemetry")]
         if data.len() >= 4 {
             log::info!(
@@ -459,6 +501,10 @@ impl OverlayShard {
         };
 
         let neighbours = overlay_shard.neighbours.random_vec(None, 5);
+        let ret = BroadcastSendInfo {
+            packets: max_seqno,
+            send_to: neighbours.len() as u32
+        };     
         
         tokio::spawn(
             async move {
@@ -478,15 +524,14 @@ impl OverlayShard {
                         );
                     }
                 }   
-                overlay_shard.purge_count.fetch_add(1, Ordering::Relaxed);
-                overlay_shard.purge_broadcasts.push(bcast_id);
                 // Graceful close
                 reader.close();
                 while let Some(_) = reader.recv().await { 
                 }
+                Self::setup_broadcast_purge(&overlay_shard, bcast_id);
             }
         );
-        Ok(())
+        Ok(ret)
         
     }
 
@@ -542,6 +587,22 @@ impl OverlayShard {
             addrs
         );
         Ok(())
+    }
+
+    fn is_broadcast_outdated(&self, date: i32, peer: &Arc<KeyId>) -> bool {
+        let now = Version::get();
+        if date + (Self::TIMEOUT_BROADCAST as i32) < now {
+            log::warn!(
+                target: TARGET,
+                "Old FEC broadcast {} seconds old from {} in overlay {}",
+                now - date, 
+                peer, 
+                self.overlay_id
+            );
+            true
+        } else {
+            false
+        }
     }
 
     fn prepare_fec_broadcast(
@@ -646,7 +707,10 @@ impl OverlayShard {
         bcast: Box<BroadcastOrd>,
         raw_data: &[u8],
         peers: &AdnlPeers
-    ) -> Result<()> {           
+    ) -> Result<()> {
+        if overlay_shard.is_broadcast_outdated(bcast.date, peers.other()) {          
+            return Ok(())
+        }
         let src_key = KeyOption::from_tl_public_key(&bcast.src)?;
         let src = if (bcast.flags & Self::FLAG_BCAST_ANY_SENDER) != 0 {
             [0u8; 32]
@@ -673,7 +737,14 @@ impl OverlayShard {
                 overlay_shard.overlay_id
             );
         }
-        BroadcastReceiver::push(&overlay_shard.received_rawbytes, (data, src_key.id().clone()));
+        BroadcastReceiver::push(
+            &overlay_shard.received_rawbytes, 
+            BroadcastRecvInfo {
+                packets: 1,
+                data,
+                recv_from: src_key.id().clone()
+            }
+        );
         let neighbours = overlay_shard.neighbours.random_vec(Some(peers.other()), 3);
         // Transit broadcasts will be traced untagged 
         overlay_shard.distribute_broadcast(
@@ -683,10 +754,9 @@ impl OverlayShard {
             #[cfg(feature = "telemetry")]
             2
         ).await?;
-        overlay_shard.purge_count.fetch_add(1, Ordering::Relaxed);
-        overlay_shard.purge_broadcasts.push(bcast_id);
+        Self::setup_broadcast_purge(overlay_shard, bcast_id);
         Ok(())
-     }
+    }
 
     async fn receive_fec_broadcast(
         overlay_shard: &Arc<Self>, 
@@ -694,6 +764,9 @@ impl OverlayShard {
         raw_data: &[u8],
         peers: &AdnlPeers 
     ) -> Result<()> {
+        if overlay_shard.is_broadcast_outdated(bcast.date, peers.other()) {          
+            return Ok(())
+        }
         let bcast_id = get256(&bcast.data_hash);
         #[cfg(feature = "telemetry")]
         log::info!(
@@ -703,17 +776,6 @@ impl OverlayShard {
             raw_data.len(),
             overlay_shard.overlay_id
         );
-        let now = Version::get();
-        if bcast.date + Self::TIMEOUT_BROADCAST as i32 * 5 < now {
-            log::warn!(
-                target: TARGET,
-                "Old broadcast {} seconds old from {} in overlay {}",
-                now - bcast.date,
-                peers.other(),
-                overlay_shard.overlay_id
-            );
-            return Ok(())
-        }
         #[cfg(feature = "telemetry")]
         let stats = if let Some(stats) = overlay_shard.stats_per_transfer.get(bcast_id) {
             stats
@@ -735,29 +797,47 @@ impl OverlayShard {
         };
         #[cfg(feature = "telemetry")]
         stats.val().income.fetch_add(1, Ordering::Relaxed);
-        let transfer = if let Some(transfer) = overlay_shard.transfers_fec.get(bcast_id) {
-            transfer
-        } else {
-            let added = add_object_to_map(
-                &overlay_shard.past_broadcasts,
-                bcast_id.clone(),
-                || Ok(())
-            )?;
-            if !added {
-                return Ok(())
+        let transfer = loop {
+            if let Some(transfer) = overlay_shard.owned_broadcasts.get(bcast_id) {
+                break transfer
             }
-            add_object_to_map(
-                &overlay_shard.transfers_fec,
+            if !add_object_to_map(
+                &overlay_shard.owned_broadcasts, 
                 bcast_id.clone(),
-                || Self::create_fec_recv_transfer(overlay_shard, &bcast)
-            )?;
-            if let Some(transfer) = overlay_shard.transfers_fec.get(bcast_id) {
-                transfer
-            } else {
-                return Ok(())
+                || Ok(OwnedBroadcast::WillBeRecvFec)
+            )? {
+                tokio::task::yield_now().await;
+                continue;
+            }
+            let transfer = Self::create_fec_recv_transfer(overlay_shard, &bcast);
+            if transfer.is_err() {
+                overlay_shard.owned_broadcasts.remove(bcast_id);
+            }
+            let transfer = OwnedBroadcast::RecvFec(transfer?);
+            let ok = match overlay_shard.owned_broadcasts.insert(bcast_id.clone(), transfer) {
+                Some(removed) => match removed.val() {
+                    OwnedBroadcast::WillBeRecvFec => true,
+                    _ => false
+                },
+                _ => false
+            };
+            if !ok {
+                log::error!(  
+                    target: TARGET, 
+                    "INTERNAL ERROR: recv FEC broadcast {} creation mismatch in overlay {}",
+                    base64::encode(bcast_id),
+                    overlay_shard.overlay_id
+                )
             }
         };
         let transfer = transfer.val();
+        let transfer = if let OwnedBroadcast::RecvFec(transfer) = transfer {
+            transfer
+        } else {
+            // Not a receive FEC broadcast 
+            return Ok(())
+        };
+        transfer.updated_at.refresh();
         if &transfer.source != KeyOption::from_tl_public_key(&bcast.src)?.id() {
             log::warn!(
                 target: TARGET, 
@@ -774,7 +854,6 @@ impl OverlayShard {
         if !transfer.completed.load(Ordering::Relaxed) {
             transfer.sender.send(bcast)?;
         }
-        transfer.updated_at.refresh();
         let neighbours = overlay_shard.neighbours.random_vec(Some(peers.other()), 5); 
         #[cfg(feature = "telemetry")]
         stats.val().resent.fetch_add(neighbours.len() as u64, Ordering::Relaxed);
@@ -790,18 +869,18 @@ impl OverlayShard {
     }
 
     async fn send_broadcast(
-        &self, 
+        overlay_shard: &Arc<Self>, 
         data: &[u8], 
         source: &Arc<KeyOption>,
         overlay_key: &Arc<KeyId>
-    ) -> Result<()> {                                                        
+    ) -> Result<BroadcastSendInfo> {                                                        
         let date = Version::get();
         let signature = Self::calc_broadcast_to_sign(data, date, [0u8; 32])?;
-        let bcast_id = if let Some(bcast_id) = self.calc_broadcast_id(&signature)? {
+        let bcast_id = if let Some(bcast_id) = overlay_shard.calc_broadcast_id(&signature)? {
             bcast_id
         } else {
             log::warn!(target: TARGET, "Trying to send duplicated broadcast");
-            return Ok(());
+            return Ok(BroadcastSendInfo::default())
         };
 /*        
         let bcast_id = BroadcastOrdId {
@@ -825,7 +904,7 @@ impl OverlayShard {
                 base64::encode(&bcast_id),  
                 data.len(),
                 u32::from_le_bytes([data[0], data[1], data[2], data[3]]),
-                self.overlay_id
+                overlay_shard.overlay_id
             );
         }
         let signature = source.sign(&signature)?;
@@ -837,10 +916,10 @@ impl OverlayShard {
             date: Version::get(),
             signature: ton::bytes(signature.to_vec())
         }.into_boxed();                                   
-        let mut buf = self.message_prefix.clone();
+        let mut buf = overlay_shard.message_prefix.clone();
         serialize_append(&mut buf, &bcast)?;
-        let neighbours = self.neighbours.random_vec(None, 3);
-        self.distribute_broadcast(
+        let neighbours = overlay_shard.neighbours.random_vec(None, 3);
+        overlay_shard.distribute_broadcast(
             &buf, 
             overlay_key,
             &neighbours,
@@ -851,10 +930,24 @@ impl OverlayShard {
                 4
             }
         ).await?;
-        self.purge_count.fetch_add(1, Ordering::Relaxed);
-        self.purge_broadcasts.push(bcast_id);
-        Ok(())
+        Self::setup_broadcast_purge(overlay_shard, bcast_id);
+        let ret = BroadcastSendInfo {
+            packets: 1,
+            send_to: neighbours.len() as u32
+        };
+        Ok(ret)
     } 
+
+    fn setup_broadcast_purge(overlay_shard: &Arc<Self>, bcast_id: BroadcastId) {
+        let overlay_shard = overlay_shard.clone();
+        tokio::spawn(
+            async move {
+                tokio::time::sleep(Duration::from_secs(Self::TIMEOUT_BROADCAST)).await;
+                overlay_shard.purge_broadcasts_count.fetch_add(1, Ordering::Relaxed);
+                overlay_shard.purge_broadcasts.push(bcast_id);
+            }
+        );
+    }
 
     fn update_neighbours(&self, n: u32) -> Result<()> {
         if self.overlay_key.is_some() {
@@ -1166,7 +1259,7 @@ impl OverlayNode {
         overlay_id: &Arc<OverlayShortId>, 
         data: &[u8], 
         source: Option<&Arc<KeyOption>>
-    ) -> Result<u32> {
+    ) -> Result<BroadcastSendInfo> {
         log::trace!(target: TARGET, "Broadcast {} bytes", data.len());
         let shard = self.shards.get(overlay_id).ok_or_else(
             || error!("Trying broadcast to unknown overlay {}", overlay_id)
@@ -1175,11 +1268,10 @@ impl OverlayNode {
         let source = source.unwrap_or(&self.node_key);
         let overlay_key = shard.overlay_key.as_ref().unwrap_or(&self.node_key).id();
         if data.len() <= Self::MAX_SIZE_ORDINARY_BROADCAST {
-            shard.send_broadcast(data, source, overlay_key).await?
+            OverlayShard::send_broadcast(shard, data, source, overlay_key).await
         } else {
-            OverlayShard::create_fec_send_transfer(shard, data, source, overlay_key)?
+            OverlayShard::create_fec_send_transfer(shard, data, source, overlay_key)
         }
-        Ok(shard.neighbours.count())
     } 
 
     /// Calculate overlay ID for shard
@@ -1249,6 +1341,14 @@ impl OverlayNode {
         // DO NOT DELETE from ADNL, because it may be shared between overlays
         // self.adnl.delete_peer(self.node_key.id(), peer)
         Ok(true)
+    }
+
+    /// Get debug trace
+    pub fn get_debug_trace(&self, overlay_id: &Arc<OverlayShortId>) -> Result<u32> {
+        let shard = self.shards.get(overlay_id).ok_or_else(
+            || error!("Getting trace from unknown overlay {}", overlay_id)
+        )?;
+        Ok(shard.val().debug_trace.load(Ordering::Relaxed))
     }
 
     /// Get query prefix
@@ -1382,7 +1482,7 @@ impl OverlayNode {
     pub async fn wait_for_broadcast(
         &self, 
         overlay_id: &Arc<OverlayShortId>
-    ) -> Result<(Vec<u8>, Arc<KeyId>)> {
+    ) -> Result<BroadcastRecvInfo> {
         let shard = self.shards.get(overlay_id).ok_or_else(
             || error!("Waiting for broadcast in unknown overlay {}", overlay_id)
         )?;
@@ -1451,9 +1551,9 @@ impl OverlayNode {
                     nodes: lockfree::map::Map::new(),
                     overlay_id: overlay_id.clone(),
                     overlay_key: overlay_key.clone(),
-                    past_broadcasts: lockfree::map::Map::new(),
+                    owned_broadcasts: lockfree::map::Map::new(),
                     purge_broadcasts: lockfree::queue::Queue::new(),
-                    purge_count: AtomicU32::new(0),
+                    purge_broadcasts_count: AtomicU32::new(0),
                     query_prefix: serialize(&query_prefix)?,
                     random_peers: AddressCache::with_limit(Self::MAX_SHARD_PEERS),
                     received_catchain,
@@ -1471,7 +1571,6 @@ impl OverlayNode {
                             synclock: AtomicU32::new(0)
                         }
                     ),
-                    transfers_fec: lockfree::map::Map::new(),
                     #[cfg(feature = "telemetry")]
                     start: Instant::now(),
                     #[cfg(feature = "telemetry")]
@@ -1485,7 +1584,8 @@ impl OverlayNode {
                     #[cfg(feature = "telemetry")]  
                     stats_per_peer_send: lockfree::map::Map::new(),
                     #[cfg(feature = "telemetry")]  
-                    stats_per_transfer: lockfree::map::Map::new()
+                    stats_per_transfer: lockfree::map::Map::new(),
+                    debug_trace: AtomicU32::new(0)
                 };
                 shard.update_neighbours(Self::MAX_SHARD_NEIGHBOURS)?;
                 Ok(Arc::new(shard))
@@ -1501,13 +1601,14 @@ impl OverlayNode {
                 async move {
                     let mut timeout_peers = 0;
                     while Arc::strong_count(&shard) > 1 {
-                        while shard.purge_count.load(Ordering::Relaxed) > Self::MAX_BROADCAST_LOG {
+                        let upto = Self::MAX_BROADCAST_LOG;
+                        while shard.purge_broadcasts_count.load(Ordering::Relaxed) > upto {
                             if let Some(bcast_id) = shard.purge_broadcasts.pop() {
-                                shard.past_broadcasts.remove(&bcast_id);
+                                shard.owned_broadcasts.remove(&bcast_id);
                                 #[cfg(feature = "telemetry")]
                                 shard.stats_per_transfer.remove(&bcast_id);
                             }
-                            shard.purge_count.fetch_sub(1, Ordering::Relaxed);
+                            shard.purge_broadcasts_count.fetch_sub(1, Ordering::Relaxed);
                         }
                         timeout_peers += Self::TIMEOUT_GC;
                         if timeout_peers > Self::TIMEOUT_PEERS {
