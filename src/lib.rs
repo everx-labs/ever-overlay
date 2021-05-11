@@ -1351,6 +1351,20 @@ impl OverlayNode {
         Ok(shard.val().debug_trace.load(Ordering::Relaxed))
     }
 
+    /// Get locally cached random peers
+    pub fn get_cached_random_peers(
+        &self,
+        dst: &AddressCache,  
+        overlay_id: &Arc<OverlayShortId>, 
+        n: u32
+    ) -> Result<()> {
+        let shard = self.shards.get(overlay_id).ok_or_else(
+            || error!("Getting cached random peers from unknown overlay {}", overlay_id)
+        )?;
+        let shard = shard.val();
+        shard.known_peers.random_set(dst, Some(&shard.bad_peers), n)
+    }
+
     /// Get query prefix
     pub fn get_query_prefix(&self, overlay_id: &Arc<OverlayShortId>) -> Result<Vec<u8>> {
         let shard = self.shards.get(overlay_id).ok_or_else(
