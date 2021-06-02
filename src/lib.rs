@@ -251,7 +251,7 @@ impl OverlayShard {
 
     const SIZE_BROADCAST_WAVE: u32 = 20;
     const SPINNER: u64 = 10;              // Milliseconds
-    const TIMEOUT_BROADCAST: u64 = 100;   // Seconds
+    const TIMEOUT_BROADCAST: u64 = 60;    // Seconds
     const FLAG_BCAST_ANY_SENDER: i32 = 1;
 
     fn calc_broadcast_id(&self, data: &[u8]) -> Result<Option<BroadcastId>> {
@@ -416,7 +416,7 @@ impl OverlayShard {
 
         let ret = RecvTransferFec {
             completed: AtomicBool::new(false),
-            history: PeerHistory::new(),
+            history: PeerHistory::for_recv(),
             sender,
             source,
             updated_at: UpdatedAt::new()
@@ -440,6 +440,7 @@ impl OverlayShard {
         let bcast_id = if let Some(bcast_id) = overlay_shard.calc_broadcast_id(data)? {
             bcast_id
         } else {
+            log::warn!(target: TARGET, "Trying to send duplicated broadcast");
             return Ok(BroadcastSendInfo::default())
         };
         let mut transfer = SendTransferFec {
@@ -570,11 +571,11 @@ impl OverlayShard {
             };
             #[cfg(feature = "telemetry")]
             addrs.push(format!("{}", peers.other()));
-            if let Err(e) = self.adnl.send_custom(data, peers).await {
+            if let Err(e) = self.adnl.send_custom(data, peers.clone()) {
                 log::warn!(
                     target: TARGET,
-                    "Broadcast {} bytes to overlay {}, wasn't send to {}: {}",
-                    data.len(), self.overlay_id, neighbour, e
+                    "Cannot distribute broadcast in overlay {} to {}: {}",
+                    self.overlay_id, neighbour, e
                 )
             }
         }
@@ -1424,7 +1425,7 @@ impl OverlayNode {
         }
         let mut buf = shard.message_prefix.clone();
         buf.extend_from_slice(data);
-        self.adnl.send_custom(&buf, &peers).await
+        self.adnl.send_custom(&buf, peers)
     }
 
     /// Send query via ADNL
@@ -1445,7 +1446,7 @@ impl OverlayNode {
             let (tag, _) = query.serialize_boxed();
             shard.update_stats(dst, tag.0, true)?;
         }
-        self.adnl.query_with_prefix(
+        self.adnl.clone().query_with_prefix(
             Some(&shard.query_prefix), 
             query,
             &peers,
@@ -1786,19 +1787,6 @@ impl Subscriber for OverlayNode {
             }
         }
     }
-
-    async fn try_consume_query(
-        &self, 
-        object: TLObject, 
-        peers: &AdnlPeers
-    ) -> Result<QueryResult> {
-        log::warn!(
-            target: TARGET, 
-            "try_consume_query OVERLAY {:?} from {}", 
-            object, peers.other()
-        );
-        Ok(QueryResult::Rejected(object))                                    
-    }    
 
     async fn try_consume_query_bundle(
         &self, 
