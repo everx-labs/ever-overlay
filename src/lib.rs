@@ -6,6 +6,8 @@ use adnl::{
     }, 
     node::{AddressCache, AdnlNode, IpAddress, PeerHistory}
 };
+#[cfg(feature = "compression")]
+use adnl::node::DataCompression;
 use rldp::{RaptorqDecoder, RaptorqEncoder, RldpNode};
 use sha2::Digest;
 use std::{sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering}}, time::Duration};
@@ -249,10 +251,10 @@ struct OverlayShard {
 
 impl OverlayShard {
 
+    const FLAG_BCAST_ANY_SENDER: i32 = 0x01;
     const SIZE_BROADCAST_WAVE: u32 = 20;
     const SPINNER: u64 = 10;              // Milliseconds
     const TIMEOUT_BROADCAST: u64 = 60;    // Seconds
-    const FLAG_BCAST_ANY_SENDER: i32 = 1;
 
     fn calc_broadcast_id(&self, data: &[u8]) -> Result<Option<BroadcastId>> {
         let bcast_id = sha2::Sha256::digest(data);
@@ -436,13 +438,19 @@ impl OverlayShard {
         let source = source.clone();
         let (sender, mut reader) = tokio::sync::mpsc::unbounded_channel();
 
-        let data_size = data.len() as u32;
         let bcast_id = if let Some(bcast_id) = overlay_shard.calc_broadcast_id(data)? {
             bcast_id
         } else {
             log::warn!(target: TARGET, "Trying to send duplicated broadcast");
             return Ok(BroadcastSendInfo::default())
         };
+
+        #[cfg(feature = "compression")]
+        let data = DataCompression::compress(data)?;
+        #[cfg(feature = "compression")]
+        let data = &data[..];
+        let data_size = data.len() as u32;
+
         let mut transfer = SendTransferFec {
             bcast_id: bcast_id.clone(),
             encoder: RaptorqEncoder::with_data(data),
@@ -678,9 +686,11 @@ impl OverlayShard {
         src_key.verify(&signature, &bcast.signature.0)?;
 
         if let Some(ret) = decoder.decode(bcast.seqno as u32, &bcast.data) {
-            if ret.len() != bcast.data_size as usize {
+            let ret = if ret.len() != bcast.data_size as usize {
                 fail!("Expected {} bytes, but received {}", bcast.data_size, ret.len())
             } else {
+                #[cfg(feature = "compression")]
+                let ret = DataCompression::decompress(&ret[..])?;
                 let test_id = sha2::Sha256::digest(&ret);
                 if test_id.as_slice() != bcast_id {
                     fail!(
@@ -694,8 +704,9 @@ impl OverlayShard {
                     "Received overlay broadcast {} ({} bytes)", 
                     base64::encode(bcast_id), 
                     ret.len()
-                ) 
-            }
+                ); 
+                ret
+            };
             Ok(Some(ret))
         } else {
             Ok(None)
@@ -718,14 +729,17 @@ impl OverlayShard {
         } else {                           
             src_key.id().data().clone()
         };
-        let signature = Self::calc_broadcast_to_sign(&bcast.data, bcast.date, src)?;
+        #[cfg(not(feature = "compression"))]
+        let ton::bytes(data) = bcast.data;
+        #[cfg(feature = "compression")]
+        let data = DataCompression::decompress(&bcast.data)?;
+        let signature = Self::calc_broadcast_to_sign(&data[..], bcast.date, src)?;
         let bcast_id = if let Some(bcast_id) = overlay_shard.calc_broadcast_id(&signature)? {
             bcast_id
         } else {
             return Ok(());
         };
         src_key.verify(&signature, &bcast.signature.0)?;
-        let ton::bytes(data) = bcast.data;
         log::trace!(target: TARGET, "Received overlay broadcast, {} bytes", data.len());
         #[cfg(feature = "telemetry")]
         if data.len() >= 4 {
@@ -898,22 +912,30 @@ impl OverlayShard {
         let signature = key.sign(&serialize(&to_sign)?)?;
 */
         #[cfg(feature = "telemetry")]
-        if data.len() >= 4 {
-            log::info!(
-                target: TARGET_BROADCAST,
-                "Broadcast trace: send ordinary {} {} bytes, tag {:08x} to overlay {}",
-                base64::encode(&bcast_id),  
-                data.len(),
-                u32::from_le_bytes([data[0], data[1], data[2], data[3]]),
-                overlay_shard.overlay_id
-            );
-        }
+        let tag = if data.len() >= 4 {
+            u32::from_le_bytes([data[0], data[1], data[2], data[3]])
+        } else {
+            4
+        };
+        #[cfg(feature = "telemetry")]
+        log::info!(
+            target: TARGET_BROADCAST,
+            "Broadcast trace: send ordinary {} {} bytes, tag {:08x} to overlay {}",
+            base64::encode(&bcast_id),  
+            data.len(),
+            tag,
+            overlay_shard.overlay_id
+        );
+        #[cfg(not(feature = "compression"))]
+        let data = data.to_vec();
+        #[cfg(feature = "compression")]
+        let data = DataCompression::compress(data)?;
         let signature = source.sign(&signature)?;
         let bcast = BroadcastOrd {
             src: source.into_tl_public_key()?,
             certificate: OverlayCertificate::Overlay_EmptyCertificate,
             flags: Self::FLAG_BCAST_ANY_SENDER,
-            data: ton::bytes(data.to_vec()),
+            data: ton::bytes(data),
             date: Version::get(),
             signature: ton::bytes(signature.to_vec())
         }.into_boxed();                                   
@@ -925,11 +947,7 @@ impl OverlayShard {
             overlay_key,
             &neighbours,
             #[cfg(feature = "telemetry")]
-            if data.len() >= 4 {
-                u32::from_le_bytes([data[0], data[1], data[2], data[3]])
-            } else {
-                4
-            }
+            tag
         ).await?;
         Self::setup_broadcast_purge(overlay_shard, bcast_id);
         let ret = BroadcastSendInfo {
