@@ -347,23 +347,43 @@ impl OverlayShard {
         tokio::spawn(
             async move {
                 let mut packets = 0;
+                #[cfg(feature = "telemetry")]
+                let mut flags = RecvTransferFecTelemetry::FLAG_RECEIVE_STARTED;
+                #[cfg(feature = "telemetry")]
+                let mut len = 0;
+                #[cfg(feature = "telemetry")]
+                let mut tag = 0;
                 while let Some(bcast) = reader.recv().await {
                     packets += 1; 
                     match Self::process_fec_broadcast(&mut decoder, &bcast) {
-                        Err(err) => log::warn!(  
-                            target: TARGET, 
-                            "Error when receiving overlay {} broadcast: {}",
-                            overlay_shard_recv.overlay_id,
-                            err
-                        ),
-                        Ok(Some(data)) => BroadcastReceiver::push(
-                            &overlay_shard_recv.received_rawbytes, 
-                            BroadcastRecvInfo {
-                                packets, 
-                                data, 
-                                recv_from: source_recv
+                        Err(err) => {
+                            log::warn!(  
+                                target: TARGET, 
+                                "Error when receiving overlay {} broadcast: {}",
+                                overlay_shard_recv.overlay_id,
+                                err
+                            );
+                            #[cfg(feature = "telemetry")] {
+                                flags |= RecvTransferFecTelemetry::FLAG_FAILED;
                             }
-                        ),
+                        },
+                        Ok(Some(data)) => {
+                            #[cfg(feature = "telemetry")] {
+                                if data.len() > 4 {
+                                    tag = u32::from_le_bytes([data[0], data[1], data[2], data[3]])
+                                }
+                                len = data.len() as u32;
+                                flags |= RecvTransferFecTelemetry::FLAG_RECEIVED;
+                            }
+                            BroadcastReceiver::push(
+                                &overlay_shard_recv.received_rawbytes, 
+                                BroadcastRecvInfo {
+                                    packets, 
+                                    data, 
+                                    recv_from: source_recv
+                                }
+                            )
+                        },
                         Ok(None) => continue
                     } 
                     break;
@@ -371,6 +391,11 @@ impl OverlayShard {
                 if let Some(transfer) = overlay_shard_recv.owned_broadcasts.get(&bcast_id_recv) {
                     if let OwnedBroadcast::RecvFec(transfer) = transfer.val() {
                         transfer.completed.store(true, Ordering::Relaxed);
+                        #[cfg(feature = "telemetry")] {
+                            transfer.telemetry.flags.fetch_or(flags, Ordering::Relaxed);
+                            transfer.telemetry.len.store(len, Ordering::Relaxed);
+                            transfer.telemetry.tag.store(tag, Ordering::Relaxed);
+                        }
                     } else {
                         log::error!(  
                             target: TARGET, 
@@ -421,6 +446,12 @@ impl OverlayShard {
             history: PeerHistory::for_recv(),
             sender,
             source,
+            #[cfg(feature = "telemetry")]
+            telemetry: RecvTransferFecTelemetry {
+                flags: AtomicU32::new(0),
+                len: AtomicU32::new(0),
+                tag: AtomicU32::new(0)
+            },
             updated_at: UpdatedAt::new()
         };
         Ok(ret)
@@ -936,7 +967,7 @@ impl OverlayShard {
             certificate: OverlayCertificate::Overlay_EmptyCertificate,
             flags: Self::FLAG_BCAST_ANY_SENDER,
             data: ton::bytes(data),
-            date: Version::get(),
+            date,
             signature: ton::bytes(signature.to_vec())
         }.into_boxed();                                   
         let mut buf = overlay_shard.message_prefix.clone();
@@ -982,11 +1013,11 @@ impl OverlayShard {
     }
 
     #[cfg(feature = "telemetry")]
-    fn print_stats(&self) {
+    fn print_stats(&self) -> Result<()> {
         let elapsed = self.start.elapsed().as_secs();
         if elapsed == 0 {
             // Too early to print stats
-            return
+            return Ok(())
         }
         let messages_recv = self.messages_recv.load(Ordering::Relaxed);
         let messages_send = self.messages_send.load(Ordering::Relaxed);
@@ -1003,6 +1034,9 @@ impl OverlayShard {
             );
             for tag in dst.val().iter() {
                 let count = tag.val().load(Ordering::Relaxed);
+                if count / elapsed < 1 {
+                    continue
+                }
                 log::info!(
                     target: TARGET, 
                     "  OVERLAY STAT send {} tag {:x}: {}, {} per sec average load", 
@@ -1023,6 +1057,9 @@ impl OverlayShard {
             );
             for tag in dst.val().iter() {
                 let count = tag.val().load(Ordering::Relaxed);
+                if count / elapsed < 1 {
+                    continue;
+                }
                 log::info!(
                     target: TARGET, 
                     "  OVERLAY STAT recv {} tag {:x}: {}, {} per sec average load", 
@@ -1030,7 +1067,14 @@ impl OverlayShard {
                 );
             }
         }
+        let mut inc = 0;
+        let mut pas = 0;
+        let mut res = 0;
         for transfer in self.stats_per_transfer.iter() {
+            inc += transfer.val().income.load(Ordering::Relaxed);
+            pas += transfer.val().passed.load(Ordering::Relaxed);
+            res += transfer.val().resent.load(Ordering::Relaxed);
+/*
             log::info!(
                 target: TARGET, 
                 "  ** OVERLAY STAT resend transfer {}: -> {} / {} -> {}", 
@@ -1039,7 +1083,50 @@ impl OverlayShard {
                 transfer.val().passed.load(Ordering::Relaxed),
                 transfer.val().resent.load(Ordering::Relaxed)
             )
+*/
         }
+        log::info!(
+            target: TARGET, 
+            "  ** OVERLAY STAT resend {} / {} -> {}", 
+            inc, pas, res
+        );
+        let map = lockfree::map::Map::new();
+        for transfer in self.owned_broadcasts.iter() {
+            if let OwnedBroadcast::RecvFec(transfer) = transfer.val() {
+                if transfer.updated_at.is_expired(5) {
+                    continue
+                }
+                let mut tag = transfer.telemetry.tag.load(Ordering::Relaxed);
+                let flags = transfer.telemetry.flags.load(Ordering::Relaxed);
+                if (flags & RecvTransferFecTelemetry::FLAG_RECEIVED) == 0 {
+                    tag |= flags;
+                }
+                add_object_to_map(
+                    &map,
+                    tag,
+                    || Ok((AtomicU32::new(0), AtomicU32::new(0)))
+                )?;
+                if let Some(item) = map.get(&tag) {
+                   let (cnt, len) = item.val();
+                   cnt.fetch_add(1, Ordering::Relaxed);
+                   len.fetch_add(
+                       transfer.telemetry.len.load(Ordering::Relaxed), 
+                       Ordering::Relaxed
+                   );
+                }
+            }
+        }
+        for item in map.iter() {
+            let (cnt, len) = item.val();
+            let cnt = cnt.load(Ordering::Relaxed);
+            let len = len.load(Ordering::Relaxed) / cnt;
+            log::info!(
+                target: TARGET, 
+                "  ** OVERLAY STAT resend by tag {:x}: {}, {} bytes avg", 
+                item.key(), cnt, len
+            )
+        }
+        Ok(())
     }
 
     #[cfg(feature = "telemetry")]
@@ -1092,11 +1179,25 @@ impl OverlayShard {
         let elapsed = self.start.elapsed().as_secs();
         if elapsed > self.print.load(Ordering::Relaxed) {
             self.print.store(elapsed + 5, Ordering::Relaxed);
-            self.print_stats();
+            self.print_stats()?;
         }
         Ok(())
     }
 
+}
+
+#[cfg(feature = "telemetry")]
+struct RecvTransferFecTelemetry {
+    flags: AtomicU32,
+    len: AtomicU32, 
+    tag: AtomicU32 
+}
+
+#[cfg(feature = "telemetry")]
+impl RecvTransferFecTelemetry {
+    const FLAG_RECEIVE_STARTED: u32 = 0x01;
+    const FLAG_RECEIVED: u32        = 0x02;
+    const FLAG_FAILED: u32          = 0x04;
 }
 
 struct RecvTransferFec {
@@ -1104,6 +1205,8 @@ struct RecvTransferFec {
     history: PeerHistory,
     sender: tokio::sync::mpsc::UnboundedSender<Box<BroadcastFec>>,
     source: Arc<KeyId>,
+    #[cfg(feature = "telemetry")]
+    telemetry: RecvTransferFecTelemetry,
     updated_at: UpdatedAt
 }
 
@@ -1505,10 +1608,11 @@ impl OverlayNode {
 
     /// Statistics
     #[cfg(feature = "telemetry")]
-    pub fn stats(&self) {
+    pub fn stats(&self) -> Result<()> {
         for shard in self.shards.iter() {
-            shard.val().print_stats()
+            shard.val().print_stats()?
         }
+        Ok(())
     } 
     
     /// Wait for broadcast
