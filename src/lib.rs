@@ -343,6 +343,7 @@ impl OverlayShard {
         let bcast_id_wait = bcast_id_recv.clone();
         let source = KeyOption::from_tl_public_key(&bcast.src)?.id().clone();
         let source_recv = source.clone();
+        let bcast_data_size = bcast.data_size;
                 
         tokio::spawn(
             async move {
@@ -423,6 +424,14 @@ impl OverlayShard {
                             if let OwnedBroadcast::RecvFec(transfer) = transfer.val() {
                                 if !transfer.updated_at.is_expired(Self::TIMEOUT_BROADCAST) {
                                     continue
+                                }
+                                if !transfer.completed.load(Ordering::Relaxed) {
+                                    log::warn!(  
+                                        target: TARGET, 
+                                        "FEC broadcast {} ({} bytes) dropped incompleted by timeout",
+                                        base64::encode(&bcast_id_wait),
+                                        bcast_data_size
+                                    )
                                 }
                             } else {
                                 log::error!(  
@@ -682,7 +691,7 @@ impl OverlayShard {
         let mut buf = self.message_prefix.clone();
         serialize_append(&mut buf, &bcast)?;
         Ok(buf)
-
+        
     }
 
     fn process_fec_broadcast(
@@ -730,12 +739,24 @@ impl OverlayShard {
                         base64::encode(bcast_id)
                     )
                 }
-                log::trace!(
-                    target: TARGET, 
-                    "Received overlay broadcast {} ({} bytes)", 
-                    base64::encode(bcast_id), 
-                    ret.len()
-                ); 
+                let delay = Version::get() - bcast.date;
+                if delay > 1 {
+                    log::warn!(
+                        target: TARGET, 
+                        "Received overlay broadcast {} ({} bytes) in {} seconds", 
+                        base64::encode(bcast_id), 
+                        ret.len(),
+                        delay
+                    )
+                } else {
+                    log::trace!(
+                        target: TARGET, 
+                        "Received overlay broadcast {} ({} bytes) in {} seconds", 
+                        base64::encode(bcast_id), 
+                        ret.len(),
+                        delay
+                    )
+                }
                 ret
             };
             Ok(Some(ret))
