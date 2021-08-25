@@ -65,9 +65,9 @@ pub fn build_overlay_node_info(
     let signature = base64::decode(signature)?;
     let node = Node {
         id: Ed25519 {
-            key: ton::int256(arrayref::array_ref!(&key, 0, 32).clone())
+            key: ton::int256(*arrayref::array_ref!(&key, 0, 32))
         }.into_boxed(),
-        overlay: ton::int256(overlay.data().clone()),
+        overlay: ton::int256(*overlay.data()),
         version,
         signature: ton::bytes(signature)
     };
@@ -146,7 +146,7 @@ impl OverlayUtils {
         let overlay = ShardPublicOverlayId {
             shard: 1i64 << 63,
             workchain,
-            zero_state_file_hash: ton::int256(zero_state_file_hash.clone())
+            zero_state_file_hash: ton::int256(*zero_state_file_hash)
         };
         hash(overlay)
     }
@@ -185,9 +185,9 @@ impl OverlayUtils {
         }
         let node_to_sign = NodeToSign {
             id: AdnlShortId {
-                id: ton::int256(key.id().data().clone())
+                id: ton::int256(*key.id().data())
             },
-            overlay: node.overlay.clone(),
+            overlay: node.overlay,
             version: node.version 
         }.into_boxed();    
         if let Err(e) = key.verify(&serialize(&node_to_sign)?, &node.signature) {
@@ -269,19 +269,19 @@ impl OverlayShard {
         let bcast_id = arrayref::array_ref!(bcast_id.as_slice(), 0, 32);
         let added = add_object_to_map(
             &self.owned_broadcasts,
-            bcast_id.clone(),
+            *bcast_id,
             || Ok(OwnedBroadcast::Other)
         )?;
         if !added {
             Ok(None)
         } else {
-            Ok(Some(bcast_id.clone()))
+            Ok(Some(*bcast_id))
         }
     }
 
     fn calc_broadcast_to_sign(data: &[u8], date: i32, src: [u8; 32]) -> Result<Vec<u8>> { 
         let data_hash = sha2::Sha256::digest(data);
-        let data_hash = arrayref::array_ref!(data_hash.as_slice(), 0, 32).clone();
+        let data_hash = *arrayref::array_ref!(data_hash.as_slice(), 0, 32);
         let bcast_id = BroadcastOrdId {
             src: ton::int256(src),
             data_hash: ton::int256(data_hash),
@@ -295,6 +295,7 @@ impl OverlayShard {
         serialize(&to_sign)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn calc_fec_part_to_sign(
         data_hash: &[u8; 32],
         data_size: i32, 
@@ -309,13 +310,13 @@ impl OverlayShard {
         let broadcast_id = BroadcastFecId {
             src: ton::int256(src),
             type_: ton::int256(hash(params.clone())?),
-            data_hash: ton::int256(data_hash.clone()),
+            data_hash: ton::int256(*data_hash),
             size: data_size,
             flags
         };
         let broadcast_hash = hash(broadcast_id)?;
         let part_data_hash = sha2::Sha256::digest(part);
-        let part_data_hash = arrayref::array_ref!(part_data_hash.as_slice(), 0, 32).clone();
+        let part_data_hash = *arrayref::array_ref!(part_data_hash.as_slice(), 0, 32);
 
         let part_id = BroadcastFecPartId {
             broadcast_hash: ton::int256(broadcast_hash),
@@ -334,7 +335,7 @@ impl OverlayShard {
 
     fn create_fec_recv_transfer(
         overlay_shard: &Arc<Self>, 
-        bcast: &Box<BroadcastFec>
+        bcast: &BroadcastFec
     ) -> Result<RecvTransferFec> {
 
         let fec_type = if let FecType::Fec_RaptorQ(fec_type) = &bcast.fec {
@@ -344,11 +345,11 @@ impl OverlayShard {
         };
                         
         let overlay_shard_recv = overlay_shard.clone();
-        let bcast_id_recv = get256(&bcast.data_hash).clone();
+        let bcast_id_recv = *get256(&bcast.data_hash);
         let (sender, mut reader) = tokio::sync::mpsc::unbounded_channel::<Box<BroadcastFec>>();
         let mut decoder = RaptorqDecoder::with_params(fec_type.as_ref().clone());
         let overlay_shard_wait = overlay_shard_recv.clone();
-        let bcast_id_wait = bcast_id_recv.clone();
+        let bcast_id_wait = bcast_id_recv;
         let source = KeyOption::from_tl_public_key(&bcast.src)?.id().clone();
         let source_recv = source.clone();
         let bcast_data_size = bcast.data_size;
@@ -416,7 +417,7 @@ impl OverlayShard {
                 }
                 // Graceful close
                 reader.close();
-                while let Some(_) = reader.recv().await { 
+                while reader.recv().await.is_some() { 
                 }
             }
         );
@@ -427,30 +428,29 @@ impl OverlayShard {
                     tokio::time::sleep(
                         Duration::from_millis(Self::TIMEOUT_BROADCAST * 100)
                     ).await;
-                    match overlay_shard_wait.owned_broadcasts.get(&bcast_id_wait) {
-                        Some(transfer) => {
-                            if let OwnedBroadcast::RecvFec(transfer) = transfer.val() {
-                                if !transfer.updated_at.is_expired(Self::TIMEOUT_BROADCAST) {
-                                    continue
-                                }
-                                if !transfer.completed.load(Ordering::Relaxed) {
-                                    log::warn!(  
-                                        target: TARGET, 
-                                        "FEC broadcast {} ({} bytes) dropped incompleted by timeout",
-                                        base64::encode(&bcast_id_wait),
-                                        bcast_data_size
-                                    )
-                                }
-                            } else {
-                                log::error!(  
+                    if let Some(transfer) = overlay_shard_wait.owned_broadcasts.get(
+                        &bcast_id_wait
+                    ) {
+                        if let OwnedBroadcast::RecvFec(transfer) = transfer.val() {
+                            if !transfer.updated_at.is_expired(Self::TIMEOUT_BROADCAST) {
+                                continue
+                            }
+                            if !transfer.completed.load(Ordering::Relaxed) {
+                                log::warn!(  
                                     target: TARGET, 
-                                    "INTERNAL ERROR: recv FEC broadcast {} mismatch in overlay {}",
+                                    "FEC broadcast {} ({} bytes) dropped incompleted by timeout",
                                     base64::encode(&bcast_id_wait),
-                                    overlay_shard_wait.overlay_id
+                                    bcast_data_size
                                 )
                             }
-                        },
-                        _ => ()
+                        } else {
+                            log::error!(  
+                                target: TARGET, 
+                                "INTERNAL ERROR: recv FEC broadcast {} mismatch in overlay {}",
+                                base64::encode(&bcast_id_wait),
+                                overlay_shard_wait.overlay_id
+                            )
+                        }
                     }
                     break
                 }
@@ -502,7 +502,7 @@ impl OverlayShard {
         let data_size = data.len() as u32;
 
         let mut transfer = SendTransferFec {
-            bcast_id: bcast_id.clone(),
+            bcast_id,
             encoder: RaptorqEncoder::with_data(data),
             seqno: 0
         };
@@ -578,7 +578,7 @@ impl OverlayShard {
                 }   
                 // Graceful close
                 reader.close();
-                while let Some(_) = reader.recv().await { 
+                while reader.recv().await.is_some() { 
                 }
                 Self::setup_broadcast_purge(&overlay_shard, bcast_id);
             }
@@ -591,7 +591,7 @@ impl OverlayShard {
         &self, 
         data: &TaggedByteSlice<'_>,
         key: &Arc<KeyId>,
-        neighbours: &Vec<Arc<KeyId>>,
+        neighbours: &[Arc<KeyId>]
     ) -> Result<()> {   
         log::trace!(
             target: TARGET,
@@ -678,7 +678,7 @@ impl OverlayShard {
         let bcast = BroadcastFec {
             src: key.into_tl_public_key()?,
             certificate: OverlayCertificate::Overlay_EmptyCertificate,
-            data_hash: ton::int256(transfer.bcast_id.clone()),
+            data_hash: ton::int256(transfer.bcast_id),
             data_size: transfer.encoder.params().data_size, 
             flags: Self::FLAG_BCAST_ANY_SENDER,
             data: ton::bytes(chunk),
@@ -697,7 +697,7 @@ impl OverlayShard {
 
     fn process_fec_broadcast(
         decoder: &mut RaptorqDecoder,
-        bcast: &Box<BroadcastFec>
+        bcast: &BroadcastFec
     ) -> Result<Option<Vec<u8>>> {
            
         let fec_type = if let FecType::Fec_RaptorQ(fec_type) = &bcast.fec {
@@ -710,7 +710,7 @@ impl OverlayShard {
         let src = if (bcast.flags & Self::FLAG_BCAST_ANY_SENDER) != 0 {
             [0u8; 32]
         } else {                           
-            src_key.id().data().clone()
+            *src_key.id().data()
         };
 
         let bcast_id = get256(&bcast.data_hash);
@@ -780,7 +780,7 @@ impl OverlayShard {
         let src = if (bcast.flags & Self::FLAG_BCAST_ANY_SENDER) != 0 {
             [0u8; 32]
         } else {                           
-            src_key.id().data().clone()
+            *src_key.id().data()
         };
         #[cfg(not(feature = "compression"))]
         let ton::bytes(data) = bcast.data;
@@ -876,7 +876,7 @@ impl OverlayShard {
             }
             if !add_object_to_map(
                 &overlay_shard.owned_broadcasts, 
-                bcast_id.clone(),
+                *bcast_id,
                 || Ok(OwnedBroadcast::WillBeRecvFec)
             )? {
                 tokio::task::yield_now().await;
@@ -887,11 +887,8 @@ impl OverlayShard {
                 overlay_shard.owned_broadcasts.remove(bcast_id);
             }
             let transfer = OwnedBroadcast::RecvFec(transfer?);
-            let ok = match overlay_shard.owned_broadcasts.insert(bcast_id.clone(), transfer) {
-                Some(removed) => match removed.val() {
-                    OwnedBroadcast::WillBeRecvFec => true,
-                    _ => false
-                },
+            let ok = match overlay_shard.owned_broadcasts.insert(*bcast_id, transfer) {
+                Some(removed) => matches!(removed.val(), OwnedBroadcast::WillBeRecvFec),
                 _ => false
             };
             if !ok {
@@ -1285,7 +1282,7 @@ impl OverlayNode {
             consumers: lockfree::map::Map::new(),
             node_key,                   
             shards: lockfree::map::Map::new(),
-            zero_state_file_hash: zero_state_file_hash.clone(),
+            zero_state_file_hash: *zero_state_file_hash,
             #[cfg(feature = "telemetry")]
             tag_get_random_peers: tag_from_boxed_type::<GetRandomPeers>()
         };
@@ -1312,7 +1309,7 @@ impl OverlayNode {
         runtime: Option<tokio::runtime::Handle>,
         overlay_id: &Arc<OverlayShortId>,
         overlay_key: &Arc<KeyOption>, 
-        peers: &Vec<Arc<KeyId>>
+        peers: &[Arc<KeyId>]
     ) -> Result<bool> {
         if self.add_overlay(runtime, overlay_id, Some(overlay_key.clone()))? {
             let shard = self.shards.get(overlay_id).ok_or_else(
@@ -1465,7 +1462,7 @@ impl OverlayNode {
     pub fn delete_private_peers(
         &self, 
         local_key: &Arc<KeyId>, 
-        peers: &Vec<Arc<KeyId>>
+        peers: &[Arc<KeyId>]
     ) -> Result<bool> {
         let mut ret = false;
         for peer in peers {               
@@ -1706,10 +1703,10 @@ impl OverlayNode {
             overlay_id.clone(), 
             || {
                 let message_prefix = OverlayMessage {
-                    overlay: ton::int256(overlay_id.data().clone())
+                    overlay: ton::int256(*overlay_id.data())
                 }.into_boxed();
                 let query_prefix = OverlayQuery {
-                    overlay: ton::int256(overlay_id.data().clone())
+                    overlay: ton::int256(*overlay_id.data())
                 };
                 let received_catchain = if overlay_key.is_some() {
                     let received_catchain = Arc::new(
@@ -1782,7 +1779,7 @@ impl OverlayNode {
                 || error!("Cannot add overlay {}", overlay_id)
             )?;
             let shard = shard.val().clone();
-            let handle = runtime.unwrap_or_else(|| tokio::runtime::Handle::current());
+            let handle = runtime.unwrap_or_else(tokio::runtime::Handle::current);
             handle.spawn(
                 async move {
                     let mut timeout_peers = 0;
@@ -1874,14 +1871,14 @@ impl OverlayNode {
         let version = Version::get();
         let local_node = NodeToSign {
             id: AdnlShortId {
-                id: ton::int256(key.id().data().clone())
+                id: ton::int256(*key.id().data())
             },
-            overlay: ton::int256(overlay_id.data().clone()),
+            overlay: ton::int256(*overlay_id.data()),
             version 
         }.into_boxed();     
         let local_node = Node {
             id: key.into_tl_public_key()?,
-            overlay: ton::int256(overlay_id.data().clone()),
+            overlay: ton::int256(*overlay_id.data()),
             signature: ton::bytes(key.sign(&serialize(&local_node)?)?.to_vec()),
             version
         };     
@@ -1943,13 +1940,13 @@ impl Subscriber for OverlayNode {
             match bundle.remove(0).downcast::<Broadcast>() {
                 Ok(Broadcast::Overlay_BroadcastFec(bcast)) => {
                     OverlayShard::receive_fec_broadcast(
-                        overlay_shard.val(), bcast, data, &peers
+                        overlay_shard.val(), bcast, data, peers
                     ).await?;
                     Ok(true)
                 },
                 Ok(Broadcast::Overlay_Broadcast(bcast)) => {
                     OverlayShard::receive_broadcast(
-                        overlay_shard.val(), bcast, data, &peers
+                        overlay_shard.val(), bcast, data, peers
                     ).await?;
                     Ok(true)
                 },
