@@ -1,20 +1,22 @@
 use adnl::{
+    declare_counted,
     common::{
-        add_object_to_map, add_object_to_map_with_update, AdnlPeers, deserialize_bundle, 
+        add_counted_object_to_map, add_counted_object_to_map_with_update, 
+        add_unbound_object_to_map, AdnlPeers, CountedObject, Counter, deserialize_bundle, 
         get256, hash, hash_boxed, KeyId, KeyOption, Query, QueryResult, serialize, 
         serialize_append, Subscriber, TaggedByteSlice, TaggedTlObject, UpdatedAt, Version
     }, 
     node::{AddressCache, AdnlNode, IpAddress, PeerHistory}
 };
 #[cfg(feature = "telemetry")]
-use adnl::common::{tag_from_boxed_type, tag_from_unboxed_type};
+use adnl::{common::{tag_from_boxed_type, tag_from_unboxed_type}, telemetry::Metric};
 #[cfg(feature = "compression")]
 use adnl::node::DataCompression;
 use rldp::{RaptorqDecoder, RaptorqEncoder, RldpNode};
 use sha2::Digest;
-use std::{sync::{Arc, atomic::{AtomicBool, AtomicU32, Ordering}}, time::Duration};
+use std::{sync::{Arc, atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering}}, time::Duration};
 #[cfg(feature = "telemetry")]
-use std::{sync::atomic::AtomicU64, time::Instant};
+use std::time::Instant;
 use ton_api::{
     IntoBoxed, 
     ton::{
@@ -210,51 +212,71 @@ enum OwnedBroadcast {
 }
 
 #[cfg(feature = "telemetry")]
-struct TransferStats {
-    income: AtomicU64,
-    passed: AtomicU64,
-    resent: AtomicU64
-}
+declare_counted!(
+    struct TransferStats {
+        income: AtomicU64,
+        passed: AtomicU64,
+        resent: AtomicU64
+    }
+);
 
-struct OverlayShard {
-    adnl: Arc<AdnlNode>,
-    bad_peers: lockfree::set::Set<Arc<KeyId>>,
-    known_peers: AddressCache,
-    message_prefix: Vec<u8>,
-    neighbours: AddressCache,
-    nodes: lockfree::map::Map<Arc<KeyId>, Node>,
-    options: Arc<AtomicU32>,
-    overlay_id: Arc<OverlayShortId>,
-    overlay_key: Option<Arc<KeyOption>>,
-    owned_broadcasts: lockfree::map::Map<BroadcastId, OwnedBroadcast>,
-    purge_broadcasts: lockfree::queue::Queue<BroadcastId>,
-    purge_broadcasts_count: AtomicU32,
-    query_prefix: Vec<u8>,
-    random_peers: AddressCache,
-    received_catchain: Option<Arc<CatchainReceiver>>,
-    received_peers: Arc<BroadcastReceiver<Vec<Node>>>,
-    received_rawbytes: Arc<BroadcastReceiver<BroadcastRecvInfo>>,
-    #[cfg(feature = "telemetry")]
-    start: Instant,
-    #[cfg(feature = "telemetry")]
-    print: AtomicU64,
-    #[cfg(feature = "telemetry")]
-    messages_recv: AtomicU64,
-    #[cfg(feature = "telemetry")]
-    messages_send: AtomicU64,
-    #[cfg(feature = "telemetry")]
-    stats_per_peer_recv: lockfree::map::Map<Arc<KeyId>, lockfree::map::Map<u32, AtomicU64>>,
-    #[cfg(feature = "telemetry")]
-    stats_per_peer_send: lockfree::map::Map<Arc<KeyId>, lockfree::map::Map<u32, AtomicU64>>,
-    #[cfg(feature = "telemetry")]
-    stats_per_transfer: lockfree::map::Map<BroadcastId, TransferStats>,
-    #[cfg(feature = "telemetry")]
-    tag_broadcast_fec: u32,
-    #[cfg(feature = "telemetry")]
-    tag_broadcast_ord: u32,
-    // For debug
-    debug_trace: AtomicU32
-}
+#[cfg(feature = "telemetry")]
+declare_counted!(
+    struct PeerStats {
+        count: AtomicU64
+    }
+);
+
+declare_counted!(
+    struct NodeObject {
+        object: Node
+    }
+);
+
+declare_counted!(
+    struct OverlayShard {
+        adnl: Arc<AdnlNode>,
+        bad_peers: lockfree::set::Set<Arc<KeyId>>,
+        known_peers: AddressCache,
+        message_prefix: Vec<u8>,
+        neighbours: AddressCache,
+        nodes: lockfree::map::Map<Arc<KeyId>, NodeObject>,
+        options: Arc<AtomicU32>,
+        overlay_id: Arc<OverlayShortId>,
+        overlay_key: Option<Arc<KeyOption>>,
+        owned_broadcasts: lockfree::map::Map<BroadcastId, OwnedBroadcast>,
+        purge_broadcasts: lockfree::queue::Queue<BroadcastId>,
+        purge_broadcasts_count: AtomicU32,
+        query_prefix: Vec<u8>,
+        random_peers: AddressCache,
+        received_catchain: Option<Arc<CatchainReceiver>>,
+        received_peers: Arc<BroadcastReceiver<Vec<Node>>>,
+        received_rawbytes: Arc<BroadcastReceiver<BroadcastRecvInfo>>,
+        #[cfg(feature = "telemetry")]
+        start: Instant,
+        #[cfg(feature = "telemetry")]
+        print: AtomicU64,
+        #[cfg(feature = "telemetry")]
+        messages_recv: AtomicU64,
+        #[cfg(feature = "telemetry")]
+        messages_send: AtomicU64,
+        #[cfg(feature = "telemetry")]
+        stats_per_peer_recv: lockfree::map::Map<Arc<KeyId>, lockfree::map::Map<u32, PeerStats>>,
+        #[cfg(feature = "telemetry")]
+        stats_per_peer_send: lockfree::map::Map<Arc<KeyId>, lockfree::map::Map<u32, PeerStats>>,
+        #[cfg(feature = "telemetry")]
+        stats_per_transfer: lockfree::map::Map<BroadcastId, TransferStats>,
+        #[cfg(feature = "telemetry")]
+        tag_broadcast_fec: u32,
+        #[cfg(feature = "telemetry")]
+        tag_broadcast_ord: u32,
+        #[cfg(feature = "telemetry")]
+        telemetry: Arc<OverlayTelemetry>,
+        allocated: Arc<OverlayAlloc>,
+        // For debug
+        debug_trace: AtomicU32
+   }
+);
 
 impl OverlayShard {
 
@@ -267,7 +289,7 @@ impl OverlayShard {
     fn calc_broadcast_id(&self, data: &[u8]) -> Result<Option<BroadcastId>> {
         let bcast_id = sha2::Sha256::digest(data);
         let bcast_id = arrayref::array_ref!(bcast_id.as_slice(), 0, 32);
-        let added = add_object_to_map(
+        let added = add_unbound_object_to_map(
             &self.owned_broadcasts,
             *bcast_id,
             || Ok(OwnedBroadcast::Other)
@@ -469,8 +491,13 @@ impl OverlayShard {
                 len: AtomicU32::new(0),
                 tag: AtomicU32::new(0)
             },
-            updated_at: UpdatedAt::new()
+            updated_at: UpdatedAt::new(),
+            counter: overlay_shard.allocated.recv_transfers.clone().into()
         };
+        #[cfg(feature = "telemetry")]
+        overlay_shard.telemetry.recv_transfers.update(
+            overlay_shard.allocated.recv_transfers.load(Ordering::Relaxed)
+        );  
         Ok(ret)
 
     }
@@ -504,8 +531,13 @@ impl OverlayShard {
         let mut transfer = SendTransferFec {
             bcast_id,
             encoder: RaptorqEncoder::with_data(data),
-            seqno: 0
+            seqno: 0,
+            counter: overlay_shard.allocated.send_transfers.clone().into()
         };
+        #[cfg(feature = "telemetry")]
+        overlay_shard.telemetry.send_transfers.update(
+            overlay_shard.allocated.send_transfers.load(Ordering::Relaxed)
+        );       
         let max_seqno = (data_size / transfer.encoder.params().symbol_size as u32 + 1) * 3 / 2;
         
         #[cfg(feature = "telemetry")]
@@ -853,16 +885,22 @@ impl OverlayShard {
         let stats = if let Some(stats) = overlay_shard.stats_per_transfer.get(bcast_id) {
             stats
         } else {
-            add_object_to_map(
+            add_counted_object_to_map(
                 &overlay_shard.stats_per_transfer,
                 bcast_id.clone(),
-                || Ok(
-                    TransferStats {
+                || {
+                    let ret = TransferStats {
                         income: AtomicU64::new(0),
                         passed: AtomicU64::new(0),
-                        resent: AtomicU64::new(0)
-                    }
-                )
+                        resent: AtomicU64::new(0),
+                        counter: overlay_shard.allocated.stats_transfer.clone().into()
+                    };
+                    #[cfg(feature = "telemetry")]
+                    overlay_shard.telemetry.stats_transfer.update(
+                        overlay_shard.allocated.stats_transfer.load(Ordering::Relaxed)
+                    );
+                    Ok(ret)
+                }
             )?;
             overlay_shard.stats_per_transfer.get(bcast_id).ok_or_else(
                 || error!("INTERNAL ERROR: Cannot count transfer statistics")
@@ -874,7 +912,7 @@ impl OverlayShard {
             if let Some(transfer) = overlay_shard.owned_broadcasts.get(bcast_id) {
                 break transfer
             }
-            if !add_object_to_map(
+            if !add_unbound_object_to_map(
                 &overlay_shard.owned_broadcasts, 
                 *bcast_id,
                 || Ok(OwnedBroadcast::WillBeRecvFec)
@@ -1058,7 +1096,7 @@ impl OverlayShard {
                 self.overlay_id, dst.key()
             );
             for tag in dst.val().iter() {
-                let count = tag.val().load(Ordering::Relaxed);
+                let count = tag.val().count.load(Ordering::Relaxed);
                 if count / elapsed < 1 {
                     continue
                 }
@@ -1081,7 +1119,7 @@ impl OverlayShard {
                 self.overlay_id, dst.key()
             );
             for tag in dst.val().iter() {
-                let count = tag.val().load(Ordering::Relaxed);
+                let count = tag.val().count.load(Ordering::Relaxed);
                 if count / elapsed < 1 {
                     continue;
                 }
@@ -1126,7 +1164,7 @@ impl OverlayShard {
                 if (flags & RecvTransferFecTelemetry::FLAG_RECEIVED) == 0 {
                     tag |= flags;
                 }
-                add_object_to_map(
+                add_unbound_object_to_map(
                     &map,
                     tag,
                     || Ok((AtomicU32::new(0), AtomicU32::new(0)))
@@ -1164,7 +1202,7 @@ impl OverlayShard {
         let stats = if let Some(stats) = stats.get(dst) {
             stats 
         } else {
-            add_object_to_map(
+            add_unbound_object_to_map(
                 stats,
                 dst.clone(),
                 || Ok(lockfree::map::Map::new())
@@ -1181,10 +1219,20 @@ impl OverlayShard {
         let stats = if let Some(stats) = stats.val().get(&tag) {
             stats
         } else {
-            add_object_to_map(
+            add_counted_object_to_map(
                 stats.val(),
                 tag,
-                || Ok(AtomicU64::new(0))
+                || {
+                    let ret = PeerStats {
+                        count: AtomicU64::new(0),
+                        counter: self.allocated.stats_peer.clone().into()
+                    };
+                    #[cfg(feature = "telemetry")]
+                    self.telemetry.stats_peer.update(
+                        self.allocated.stats_peer.load(Ordering::Relaxed)
+                    );
+                    Ok(ret)
+                }
             )?;
             if let Some(stats) = stats.val().get(&tag) {
                 stats
@@ -1195,7 +1243,7 @@ impl OverlayShard {
                 )
             }
         };
-        stats.val().fetch_add(1, Ordering::Relaxed);
+        stats.val().count.fetch_add(1, Ordering::Relaxed);
         if is_send {
             self.messages_send.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -1225,37 +1273,73 @@ impl RecvTransferFecTelemetry {
     const FLAG_FAILED: u32          = 0x04;
 }
 
-struct RecvTransferFec {
-    completed: AtomicBool,
-    history: PeerHistory,
-    sender: tokio::sync::mpsc::UnboundedSender<Box<BroadcastFec>>,
-    source: Arc<KeyId>,
-    #[cfg(feature = "telemetry")]
-    telemetry: RecvTransferFecTelemetry,
-    updated_at: UpdatedAt
-}
+declare_counted!(
+    struct RecvTransferFec {
+        completed: AtomicBool,
+        history: PeerHistory,
+        sender: tokio::sync::mpsc::UnboundedSender<Box<BroadcastFec>>,
+        source: Arc<KeyId>,
+        #[cfg(feature = "telemetry")]
+        telemetry: RecvTransferFecTelemetry,
+        updated_at: UpdatedAt
+    }
+);
 
-struct SendTransferFec {
-    bcast_id: BroadcastId,
-    encoder: RaptorqEncoder,
-    seqno: u32
-}
+declare_counted!(
+    struct SendTransferFec {
+        bcast_id: BroadcastId,
+        encoder: RaptorqEncoder,
+        seqno: u32
+    }
+);
 
 #[async_trait::async_trait]
 pub trait QueriesConsumer: Send + Sync {
     async fn try_consume_query(&self, query: TLObject, peers: &AdnlPeers) -> Result<QueryResult>;
 }
 
+declare_counted!(
+    struct ConsumerObject {
+        object: Arc<dyn QueriesConsumer>
+    }
+);
+
+struct OverlayAlloc {
+    consumers: Arc<AtomicU64>,
+    overlays: Arc<AtomicU64>,
+    peers: Arc<AtomicU64>,
+    recv_transfers: Arc<AtomicU64>,
+    send_transfers: Arc<AtomicU64>,
+    #[cfg(feature = "telemetry")]
+    stats_peer: Arc<AtomicU64>,
+    #[cfg(feature = "telemetry")]
+    stats_transfer: Arc<AtomicU64>
+}
+
+#[cfg(feature = "telemetry")]
+struct OverlayTelemetry {
+    consumers: Arc<Metric>,
+    overlays: Arc<Metric>,
+    peers: Arc<Metric>,
+    recv_transfers: Arc<Metric>,
+    send_transfers: Arc<Metric>,
+    stats_peer: Arc<Metric>,
+    stats_transfer: Arc<Metric>
+}
+
 /// Overlay Node
 pub struct OverlayNode {
     adnl: Arc<AdnlNode>,
-    consumers: lockfree::map::Map<Arc<OverlayShortId>, Arc<dyn QueriesConsumer>>,
+    consumers: lockfree::map::Map<Arc<OverlayShortId>, ConsumerObject>,
     options: Arc<AtomicU32>,
     node_key: Arc<KeyOption>, 
     shards: lockfree::map::Map<Arc<OverlayShortId>, Arc<OverlayShard>>,     
     zero_state_file_hash: [u8; 32],
     #[cfg(feature = "telemetry")]
-    tag_get_random_peers: u32
+    tag_get_random_peers: u32,
+    #[cfg(feature = "telemetry")]
+    telemetry: Arc<OverlayTelemetry>,
+    allocated: Arc<OverlayAlloc>    
 }
 
 impl OverlayNode {
@@ -1276,6 +1360,27 @@ impl OverlayNode {
         key_tag: usize
     ) -> Result<Arc<Self>> {
         let node_key = adnl.key_by_tag(key_tag)?;
+        #[cfg(feature = "telemetry")]
+        let telemetry = OverlayTelemetry {
+            consumers: adnl.add_metric("Alloc OVRL consumers"),
+            overlays: adnl.add_metric("Alloc OVRL shards"),
+            peers: adnl.add_metric("Alloc OVRL peers"),
+            recv_transfers: adnl.add_metric("Alloc OVRL recv transfers"),
+            send_transfers: adnl.add_metric("Alloc OVRL send transfers"),
+            stats_peer: adnl.add_metric("Alloc OVRL peer stats"),
+            stats_transfer: adnl.add_metric("Alloc OVRL transfer stats"),            
+        };
+        let allocated = OverlayAlloc {
+            consumers: Arc::new(AtomicU64::new(0)),
+            overlays: Arc::new(AtomicU64::new(0)),
+            peers: Arc::new(AtomicU64::new(0)),
+            recv_transfers: Arc::new(AtomicU64::new(0)),
+            send_transfers: Arc::new(AtomicU64::new(0)),
+            #[cfg(feature = "telemetry")]
+            stats_peer: Arc::new(AtomicU64::new(0)),
+            #[cfg(feature = "telemetry")]
+            stats_transfer: Arc::new(AtomicU64::new(0))
+        };
         let ret = Self { 
             adnl,
             options: Arc::new(AtomicU32::new(0)),
@@ -1284,7 +1389,10 @@ impl OverlayNode {
             shards: lockfree::map::Map::new(),
             zero_state_file_hash: *zero_state_file_hash,
             #[cfg(feature = "telemetry")]
-            tag_get_random_peers: tag_from_boxed_type::<GetRandomPeers>()
+            tag_get_random_peers: tag_from_boxed_type::<GetRandomPeers>(),
+            #[cfg(feature = "telemetry")]
+            telemetry: Arc::new(telemetry),
+            allocated: Arc::new(allocated)
         };
         Ok(Arc::new(ret))
     }
@@ -1296,10 +1404,20 @@ impl OverlayNode {
         consumer: Arc<dyn QueriesConsumer>
     ) -> Result<bool> {
         log::debug!(target: TARGET, "Add consumer {} to overlay", overlay_id);
-        add_object_to_map(
+        add_counted_object_to_map(
             &self.consumers,
             overlay_id.clone(),
-            || Ok(consumer.clone())
+            || {
+                let ret = ConsumerObject {
+                    object: consumer.clone(),
+                    counter: self.allocated.consumers.clone().into()
+                };
+                #[cfg(feature = "telemetry")]
+                self.telemetry.consumers.update(
+                    self.allocated.consumers.load(Ordering::Relaxed)
+                );
+                Ok(ret)
+            }
         )
     }
 
@@ -1381,17 +1499,24 @@ impl OverlayNode {
         if shard.neighbours.count() < Self::MAX_SHARD_NEIGHBOURS {
             shard.neighbours.put(ret.clone())?;
         }  
-        add_object_to_map_with_update(
+        add_counted_object_to_map_with_update(
             &shard.nodes,
             ret.clone(),
-            |old_node| if let Some(old_node) = old_node {
-                if old_node.version < peer.version {
-                    Ok(Some(peer.clone()))
-                } else {
-                    Ok(None)
+            |old_node| {
+                if let Some(old_node) = old_node {
+                    if old_node.object.version >= peer.version {
+                        return Ok(None)
+                    }
                 }
-            } else {
-                Ok(Some(peer.clone()))
+                let ret = NodeObject {
+                    object: peer.clone(),
+                    counter: self.allocated.peers.clone().into()
+                };
+                #[cfg(feature = "telemetry")]
+                self.telemetry.peers.update(
+                    self.allocated.peers.load(Ordering::Relaxed)
+                );
+                Ok(Some(ret))
             }
         )?;
         Ok(Some(ret))
@@ -1698,7 +1823,7 @@ impl OverlayNode {
         overlay_key: Option<Arc<KeyOption>>
     ) -> Result<bool> {
         log::debug!(target: TARGET, "Add overlay {} to node", overlay_id);
-        let added = add_object_to_map(
+        let added = add_counted_object_to_map(
             &self.shards,
             overlay_id.clone(), 
             || {
@@ -1768,8 +1893,16 @@ impl OverlayNode {
                     tag_broadcast_fec: tag_from_unboxed_type::<BroadcastFec>(),
                     #[cfg(feature = "telemetry")]
                     tag_broadcast_ord: tag_from_unboxed_type::<BroadcastOrd>(),
-                    debug_trace: AtomicU32::new(0)
+                    #[cfg(feature = "telemetry")]
+                    telemetry: self.telemetry.clone(), 
+                    allocated: self.allocated.clone(),
+                    debug_trace: AtomicU32::new(0),
+                    counter: self.allocated.overlays.clone().into()
                 };
+                #[cfg(feature = "telemetry")]
+                self.telemetry.overlays.update(
+                    self.allocated.overlays.load(Ordering::Relaxed)
+                );
                 shard.update_neighbours(Self::MAX_SHARD_NEIGHBOURS)?;
                 Ok(Arc::new(shard))
             }
@@ -1820,7 +1953,7 @@ impl OverlayNode {
         let (mut iter, mut current) = nodes.first();
         while let Some(node) = current {
             if let Some(node) = shard.nodes.get(&node) {
-                ret.push(node.val().clone())
+                ret.push(node.val().object.clone())
             }
             current = nodes.next(&mut iter)
         }
@@ -1890,6 +2023,23 @@ impl OverlayNode {
 #[async_trait::async_trait]
 impl Subscriber for OverlayNode {
                                                            
+    #[cfg(feature = "telemetry")]
+    async fn poll(&self, _start: &Arc<Instant>) {
+        self.telemetry.consumers.update(self.allocated.consumers.load(Ordering::Relaxed));
+        self.telemetry.overlays.update(self.allocated.overlays.load(Ordering::Relaxed));
+        self.telemetry.peers.update(self.allocated.peers.load(Ordering::Relaxed));        
+        self.telemetry.recv_transfers.update(
+            self.allocated.recv_transfers.load(Ordering::Relaxed)
+        );
+        self.telemetry.send_transfers.update(
+            self.allocated.send_transfers.load(Ordering::Relaxed)
+        );
+        self.telemetry.stats_peer.update(self.allocated.stats_peer.load(Ordering::Relaxed));        
+        self.telemetry.stats_transfer.update(
+            self.allocated.stats_transfer.load(Ordering::Relaxed)
+        );
+    }
+
     async fn try_consume_custom(&self, data: &[u8], peers: &AdnlPeers) -> Result<bool> {
         let mut bundle = deserialize_bundle(data)?;
         if (bundle.len() < 2) || (bundle.len() > 3) {
@@ -1999,7 +2149,7 @@ impl Subscriber for OverlayNode {
         } else {
             fail!("No consumer for message in overlay {}", overlay_id)
         };
-        match consumer.val().try_consume_query(object, peers).await {
+        match consumer.val().object.try_consume_query(object, peers).await {
             Err(msg) => fail!("Unsupported query, overlay: {}, query: {}", overlay_id, msg),
             r => r
         }
