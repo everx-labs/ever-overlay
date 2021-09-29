@@ -368,8 +368,8 @@ impl OverlayShard {
                         
         let overlay_shard_recv = overlay_shard.clone();
         let bcast_id_recv = *get256(&bcast.data_hash);
-        let (sender, mut reader) = tokio::sync::mpsc::unbounded_channel::<Box<BroadcastFec>>();
-        let mut decoder = RaptorqDecoder::with_params(fec_type.as_ref().clone());
+        let (sender, mut reader) = tokio::sync::mpsc::unbounded_channel();
+        let mut decoder = RaptorqDecoder::with_params(fec_type.clone());
         let overlay_shard_wait = overlay_shard_recv.clone();
         let bcast_id_wait = bcast_id_recv;
         let source = KeyOption::from_tl_public_key(&bcast.src)?.id().clone();
@@ -801,7 +801,7 @@ impl OverlayShard {
 
     async fn receive_broadcast(
         overlay_shard: &Arc<Self>, 
-        bcast: Box<BroadcastOrd>,
+        bcast: BroadcastOrd,
         raw_data: &[u8],
         peers: &AdnlPeers
     ) -> Result<()> {
@@ -865,7 +865,7 @@ impl OverlayShard {
 
     async fn receive_fec_broadcast(
         overlay_shard: &Arc<Self>, 
-        bcast: Box<BroadcastFec>,
+        bcast: BroadcastFec,
         raw_data: &[u8],
         peers: &AdnlPeers 
     ) -> Result<()> {
@@ -1277,7 +1277,7 @@ declare_counted!(
     struct RecvTransferFec {
         completed: AtomicBool,
         history: PeerHistory,
-        sender: tokio::sync::mpsc::UnboundedSender<Box<BroadcastFec>>,
+        sender: tokio::sync::mpsc::UnboundedSender<BroadcastFec>,
         source: Arc<KeyId>,
         #[cfg(feature = "telemetry")]
         telemetry: RecvTransferFecTelemetry,
@@ -2069,12 +2069,12 @@ impl Subscriber for OverlayNode {
         if bundle.len() == 2 {
             // Private overlay
             let catchain_update = match bundle.remove(0).downcast::<CatchainBlockUpdateBoxed>() {
-                Ok(CatchainBlockUpdateBoxed::Catchain_BlockUpdate(upd)) => *upd,
+                Ok(CatchainBlockUpdateBoxed::Catchain_BlockUpdate(upd)) => upd,
                 Err(msg) => fail!("Unsupported private overlay message {:?}", msg)
             };
             let validator_session_update = 
                 match bundle.remove(0).downcast::<ValidatorSessionBlockUpdateBoxed>() {
-                    Ok(ValidatorSessionBlockUpdateBoxed::ValidatorSession_BlockUpdate(upd)) => *upd,
+                    Ok(ValidatorSessionBlockUpdateBoxed::ValidatorSession_BlockUpdate(upd)) => upd,
                     Err(msg) => fail!("Unsupported private overlay message {:?}", msg)
                 };
             let receiver = overlay_shard.val().received_catchain.as_ref().ok_or_else(
