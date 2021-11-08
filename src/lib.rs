@@ -14,7 +14,10 @@ use adnl::{common::{tag_from_boxed_type, tag_from_unboxed_type}, telemetry::Metr
 use adnl::node::DataCompression;
 use rldp::{RaptorqDecoder, RaptorqEncoder, RldpNode};
 use sha2::Digest;
-use std::{sync::{Arc, atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering}}, time::Duration};
+use std::{
+    convert::TryInto, sync::{Arc, atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering}},
+    time::Duration
+};
 #[cfg(feature = "telemetry")]
 use std::time::Instant;
 use ton_api::{
@@ -64,10 +67,11 @@ pub fn build_overlay_node_info(
     if key.len() != 32 {
         fail!("Bad public key length")
     }
+    let key: [u8; 32] = key.as_slice().try_into()?;
     let signature = base64::decode(signature)?;
     let node = Node {
         id: Ed25519 {
-            key: ton::int256(*arrayref::array_ref!(&key, 0, 32))
+            key: ton::int256(key)
         }.into_boxed(),
         overlay: ton::int256(*overlay.data()),
         version,
@@ -287,23 +291,21 @@ impl OverlayShard {
     const TIMEOUT_BROADCAST: u64 = 60;    // Seconds
 
     fn calc_broadcast_id(&self, data: &[u8]) -> Result<Option<BroadcastId>> {
-        let bcast_id = sha2::Sha256::digest(data);
-        let bcast_id = arrayref::array_ref!(bcast_id.as_slice(), 0, 32);
+        let bcast_id: [u8; 32] = sha2::Sha256::digest(data).try_into()?;
         let added = add_unbound_object_to_map(
             &self.owned_broadcasts,
-            *bcast_id,
+            bcast_id,
             || Ok(OwnedBroadcast::Other)
         )?;
         if !added {
             Ok(None)
         } else {
-            Ok(Some(*bcast_id))
+            Ok(Some(bcast_id))
         }
     }
 
     fn calc_broadcast_to_sign(data: &[u8], date: i32, src: [u8; 32]) -> Result<Vec<u8>> { 
-        let data_hash = sha2::Sha256::digest(data);
-        let data_hash = *arrayref::array_ref!(data_hash.as_slice(), 0, 32);
+        let data_hash: [u8; 32] = sha2::Sha256::digest(data).try_into()?;
         let bcast_id = BroadcastOrdId {
             src: ton::int256(src),
             data_hash: ton::int256(data_hash),
@@ -337,8 +339,7 @@ impl OverlayShard {
             flags
         };
         let broadcast_hash = hash(broadcast_id)?;
-        let part_data_hash = sha2::Sha256::digest(part);
-        let part_data_hash = *arrayref::array_ref!(part_data_hash.as_slice(), 0, 32);
+        let part_data_hash: [u8; 32] = sha2::Sha256::digest(part).try_into()?;
 
         let part_id = BroadcastFecPartId {
             broadcast_hash: ton::int256(broadcast_hash),
