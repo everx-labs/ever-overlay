@@ -16,7 +16,7 @@ use adnl::{
     common::{
         add_counted_object_to_map, add_counted_object_to_map_with_update, 
         add_unbound_object_to_map, AdnlPeers, CountedObject, Counter, deserialize_bundle, 
-        get256, hash, hash_boxed, KeyId, KeyOption, Query, QueryResult, serialize, 
+        hash, hash_boxed, KeyId, KeyOption, Query, QueryResult, serialize, 
         serialize_append, Subscriber, TaggedByteSlice, TaggedTlObject, UpdatedAt, Version
     }, 
     node::{AddressCache, AdnlNode, IpAddress, PeerHistory}
@@ -65,7 +65,7 @@ use ton_api::{
 };
 #[cfg(feature = "telemetry")]
 use ton_api::BoxedSerialize;
-use ton_types::{error, fail, Result};
+use ton_types::{error, fail, Result, UInt256};
 
 const TARGET: &str = "overlay";
 const TARGET_BROADCAST: &str = "overlay_broadcast";
@@ -84,9 +84,9 @@ pub fn build_overlay_node_info(
     let signature = base64::decode(signature)?;
     let node = Node {
         id: Ed25519 {
-            key: ton::int256(key)
+            key: UInt256::with_array(key)
         }.into_boxed(),
-        overlay: ton::int256(*overlay.data()),
+        overlay: UInt256::with_array(*overlay.data()),
         version,
         signature: ton::bytes(signature)
     };
@@ -172,7 +172,7 @@ impl OverlayUtils {
         let overlay = ShardPublicOverlayId {
             shard: 1i64 << 63,
             workchain,
-            zero_state_file_hash: ton::int256(*zero_state_file_hash)
+            zero_state_file_hash: UInt256::with_array(*zero_state_file_hash)
         };
         hash(overlay)
     }
@@ -201,17 +201,17 @@ impl OverlayUtils {
     /// Verify node info
     pub fn verify_node(overlay_id: &Arc<OverlayShortId>, node: &Node) -> Result<()> {
         let key = KeyOption::from_tl_public_key(&node.id)?; 
-        if get256(&node.overlay) != overlay_id.data() {
+        if node.overlay.as_slice() != overlay_id.data() {
             fail!(
                 "Got peer {} with wrong overlay {}, expected {}",
                 key.id(),
-                base64::encode(get256(&node.overlay)),
+                base64::encode(node.overlay.as_slice()),
                 overlay_id
             )
         }
         let node_to_sign = NodeToSign {
             id: AdnlShortId {
-                id: ton::int256(*key.id().data())
+                id: UInt256::with_array(*key.id().data())
             },
             overlay: node.overlay,
             version: node.version 
@@ -327,13 +327,13 @@ impl OverlayShard {
     fn calc_broadcast_to_sign(data: &[u8], date: i32, src: [u8; 32]) -> Result<Vec<u8>> { 
         let data_hash: [u8; 32] = sha2::Sha256::digest(data).try_into()?;
         let bcast_id = BroadcastOrdId {
-            src: ton::int256(src),
-            data_hash: ton::int256(data_hash),
+            src: UInt256::with_array(src),
+            data_hash: UInt256::with_array(data_hash),
             flags: Self::FLAG_BCAST_ANY_SENDER
         };
         let data_hash = hash(bcast_id)?;
         let to_sign = BroadcastToSign {
-            hash: ton::int256(data_hash),
+            hash: UInt256::with_array(data_hash),
             date
         }.into_boxed();
         serialize(&to_sign)
@@ -352,9 +352,9 @@ impl OverlayShard {
     ) -> Result<Vec<u8>> {
 
         let broadcast_id = BroadcastFecId {
-            src: ton::int256(src),
-            type_: ton::int256(hash(params.clone())?),
-            data_hash: ton::int256(*data_hash),
+            src: UInt256::with_array(src),
+            type_: UInt256::with_array(hash(params.clone())?),
+            data_hash: UInt256::with_array(*data_hash),
             size: data_size,
             flags
         };
@@ -362,14 +362,14 @@ impl OverlayShard {
         let part_data_hash: [u8; 32] = sha2::Sha256::digest(part).try_into()?;
 
         let part_id = BroadcastFecPartId {
-            broadcast_hash: ton::int256(broadcast_hash),
-            data_hash: ton::int256(part_data_hash),
+            broadcast_hash: UInt256::with_array(broadcast_hash),
+            data_hash: UInt256::with_array(part_data_hash),
             seqno
         };
         let part_hash = hash(part_id)?;
 
         let to_sign = BroadcastToSign {
-            hash: ton::int256(part_hash),
+            hash: UInt256::with_array(part_hash),
             date
         }.into_boxed();
         serialize(&to_sign)
@@ -388,7 +388,7 @@ impl OverlayShard {
         };
                         
         let overlay_shard_recv = overlay_shard.clone();
-        let bcast_id_recv = *get256(&bcast.data_hash);
+        let bcast_id_recv = bcast.data_hash.inner();
         let (sender, mut reader) = tokio::sync::mpsc::unbounded_channel();
         let mut decoder = RaptorqDecoder::with_params(fec_type.clone());
         let overlay_shard_wait = overlay_shard_recv.clone();
@@ -743,7 +743,7 @@ impl OverlayShard {
         let bcast = BroadcastFec {
             src: key.into_tl_public_key()?,
             certificate: OverlayCertificate::Overlay_EmptyCertificate,
-            data_hash: ton::int256(transfer.bcast_id),
+            data_hash: UInt256::with_array(transfer.bcast_id),
             data_size: transfer.encoder.params().data_size, 
             flags: Self::FLAG_BCAST_ANY_SENDER,
             data: ton::bytes(chunk),
@@ -778,7 +778,7 @@ impl OverlayShard {
             *src_key.id().data()
         };
 
-        let bcast_id = get256(&bcast.data_hash);
+        let bcast_id = bcast.data_hash.as_slice();
         let signature = Self::calc_fec_part_to_sign(
             bcast_id,
             bcast.data_size, 
@@ -905,7 +905,7 @@ impl OverlayShard {
         if overlay_shard.is_broadcast_outdated(bcast.date, peers.other()) {          
             return Ok(())
         }
-        let bcast_id = get256(&bcast.data_hash);
+        let bcast_id = bcast.data_hash.as_slice();
         #[cfg(feature = "telemetry")]
         log::info!(
             target: TARGET_BROADCAST,
@@ -1841,10 +1841,10 @@ impl OverlayNode {
             overlay_id.clone(), 
             || {
                 let message_prefix = OverlayMessage {
-                    overlay: ton::int256(*overlay_id.data())
+                    overlay: UInt256::with_array(*overlay_id.data())
                 }.into_boxed();
                 let query_prefix = OverlayQuery {
-                    overlay: ton::int256(*overlay_id.data())
+                    overlay: UInt256::with_array(*overlay_id.data())
                 };
                 let received_catchain = if overlay_key.is_some() {
                     let received_catchain = Arc::new(
@@ -2019,14 +2019,14 @@ impl OverlayNode {
         let version = Version::get();
         let local_node = NodeToSign {
             id: AdnlShortId {
-                id: ton::int256(*key.id().data())
+                id: UInt256::with_array(*key.id().data())
             },
-            overlay: ton::int256(*overlay_id.data()),
+            overlay: UInt256::with_array(*overlay_id.data()),
             version 
         }.into_boxed();     
         let local_node = Node {
             id: key.into_tl_public_key()?,
-            overlay: ton::int256(*overlay_id.data()),
+            overlay: UInt256::with_array(*overlay_id.data()),
             signature: ton::bytes(key.sign(&serialize(&local_node)?)?.to_vec()),
             version
         };     
@@ -2061,12 +2061,7 @@ impl Subscriber for OverlayNode {
             return Ok(false)
         }
         let overlay_id = match bundle.remove(0).downcast::<OverlayMessageBoxed>() {
-            Ok(msg) => {
-                let OverlayMessage { 
-                    overlay: ton::int256(overlay_id)
-                } = msg.only();
-                OverlayShortId::from_data(overlay_id)
-            },
+            Ok(msg) => OverlayShortId::from_data(msg.only().overlay.inner()),
             Err(msg) => {
                 log::debug!(target: TARGET, "Unsupported overlay message {:?}", msg);
                 return Ok(false)
@@ -2122,10 +2117,7 @@ impl Subscriber for OverlayNode {
             return Ok(QueryResult::RejectedBundle(objects))
         }
         let overlay_id = match objects.remove(0).downcast::<OverlayQuery>() {
-            Ok(query) => {
-                let ton::int256(overlay_id) = query.overlay;
-                OverlayShortId::from_data(overlay_id)
-            },
+            Ok(query) => OverlayShortId::from_data(query.overlay.inner()),
             Err(query) => {
                 objects.insert(0, query);
                 return Ok(QueryResult::RejectedBundle(objects))
