@@ -8,7 +8,6 @@ version = '0.6.49'
 
 [workspace]
 
-
 [dependencies]
 async-trait = '0.1'
 base64 = '0.13'
@@ -36,4 +35,3 @@ dht = { git = 'https://github.com/tonlabs/ton-labs-dht', tag = '0.5.61' }
 compression = [ 'adnl/compression' ]
 telemetry = [ 'adnl/telemetry', 'rldp/telemetry' ]
 telemetry_test_only = [ 'adnl/telemetry', 'dht/telemetry', 'rldp/telemetry' ]
-
