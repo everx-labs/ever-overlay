@@ -16,7 +16,7 @@ hex = '0.4'
 log = '0.4'
 rand = '0.7'
 sha2 = '0.9'
-adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.65' }
+adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ton-labs-adnl', tag = '0.7.66' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
 rldp = { git = 'https://github.com/tonlabs/ton-labs-rldp', tag = '0.7.60' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
