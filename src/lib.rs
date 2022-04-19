@@ -410,7 +410,7 @@ impl OverlayShard {
                         None => break
                     };
                     packets += 1; 
-                    match Self::process_fec_broadcast(&mut decoder, &bcast) {
+                    match Self::process_fec_broadcast(&overlay_shard_recv, &mut decoder, &bcast) {
                         Err(err) => {
                             log::warn!(
                                 target: TARGET, 
@@ -758,6 +758,7 @@ impl OverlayShard {
     }
 
     fn process_fec_broadcast(
+        overlay_shard: &Arc<OverlayShard>, 
         decoder: &mut RaptorqDecoder,
         bcast: &BroadcastFec
     ) -> Result<Option<Vec<u8>>> {
@@ -796,6 +797,7 @@ impl OverlayShard {
                     Some(maybe) => if sha256_digest(&maybe) != *bcast_id {
                         (ret, true)
                     } else {
+                        overlay_shard.adnl.set_options(AdnlNode::OPTION_FORCE_COMPRESSION); 
                         (maybe, false)
                     },
                     None => (ret, true)
@@ -858,7 +860,10 @@ impl OverlayShard {
                 let signature = Self::calc_broadcast_to_sign(&maybe[..], bcast.date, src)?;
                 match overlay_shard.calc_broadcast_id(&signature)? {
                     Some(bcast_id) => match src_key.verify(&signature, &bcast.signature.0) {
-                        Ok(_) => (maybe, Some(bcast_id), false),
+                        Ok(_) => {
+                            overlay_shard.adnl.set_options(AdnlNode::OPTION_FORCE_COMPRESSION);
+                            (maybe, Some(bcast_id), false)
+                        },
                         Err(_) => (data, None, true)
                     },
                     None => (maybe, None, false)
