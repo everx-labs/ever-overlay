@@ -1621,24 +1621,12 @@ impl OverlayNode {
 
     /// Delete private_overlay
     pub fn delete_private_overlay(&self, overlay_id: &Arc<OverlayShortId>) -> Result<bool> {
-        log::debug!(target: TARGET, "Delete private overlay {}", overlay_id);
-        if let Some(shard) = self.shards.get(overlay_id) {
-            let shard = shard.val();
-            shard.overlay_key.as_ref().ok_or_else(
-                || error!("Try to delete public overlay {}", overlay_id)
-            )?; 
-            if let Some(received_catchain) = shard.received_catchain.as_ref() {
-                BroadcastReceiver::stop(received_catchain)
-            }
-            BroadcastReceiver::stop(&shard.received_peers);
-            BroadcastReceiver::stop(&shard.received_rawbytes);
-            self.shards.remove(overlay_id);
-            log::debug!(target: TARGET, "Delete consumer {} from private overlay", overlay_id);
-            self.consumers.remove(overlay_id);
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        self.delete_overlay(overlay_id, true)
+    }
+
+    /// Delete public_overlay
+    pub fn delete_public_overlay(&self, overlay_id: &Arc<OverlayShortId>) -> Result<bool> {
+        self.delete_overlay(overlay_id, false)
     }
 
     /// Delete private overlay peers 
@@ -1979,6 +1967,36 @@ impl OverlayNode {
             );
         }
         Ok(added)
+    }
+
+    fn delete_overlay(&self, overlay_id: &Arc<OverlayShortId>, is_private: bool) -> Result<bool> {
+        let type_of = if is_private {
+            "private"
+        } else {
+            "public"
+        };
+        log::debug!(target: TARGET, "Delete {} overlay {}", type_of, overlay_id);
+        if let Some(shard) = self.shards.get(overlay_id) {
+            let shard = shard.val();
+            if is_private {
+                if shard.overlay_key.is_none() {
+                    fail!("Try to delete public overlay {} as private", overlay_id)
+                }
+                if let Some(received_catchain) = shard.received_catchain.as_ref() {
+                    BroadcastReceiver::stop(received_catchain)
+                }
+            } else if shard.overlay_key.is_some() {
+                fail!("Try to delete private overlay {} as public", overlay_id)
+            }  
+            BroadcastReceiver::stop(&shard.received_peers);
+            BroadcastReceiver::stop(&shard.received_rawbytes);
+            self.shards.remove(overlay_id);
+            log::debug!(target: TARGET, "Delete consumer {} from {} overlay", overlay_id, type_of);
+            self.consumers.remove(overlay_id);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     fn get_shard(&self, overlay_id: &Arc<OverlayShortId>, msg: &str) -> Result<Arc<OverlayShard>> {
