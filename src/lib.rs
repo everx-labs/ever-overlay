@@ -23,6 +23,7 @@ use adnl::{
 #[cfg(feature = "telemetry")]
 use adnl::telemetry::Metric;
 use ever_crypto::{Ed25519KeyOption, KeyId, KeyOption, sha256_digest};
+use num_traits::pow::Pow;
 use rldp::{RaptorqDecoder, RaptorqEncoder, RldpNode};
 use std::{
     convert::TryInto, sync::{Arc, atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering}},
@@ -31,7 +32,7 @@ use std::{
 #[cfg(feature = "telemetry")]
 use std::time::Instant;
 use ton_api::{
-    deserialize_boxed_bundle, IntoBoxed, serialize_boxed, serialize_boxed_append, 
+    deserialize_boxed_bundle_with_suffix, IntoBoxed, serialize_boxed, serialize_boxed_append, 
     ton::{
         self, TLObject, 
         adnl::id::short::Short as AdnlShortId, 
@@ -269,7 +270,7 @@ declare_counted!(
         purge_broadcasts: lockfree::queue::Queue<BroadcastId>,
         purge_broadcasts_count: AtomicU32,
         query_prefix: Vec<u8>,
-        random_peers: AddressCache,
+//        random_peers: AddressCache,
         received_catchain: Option<Arc<CatchainReceiver>>,
         received_peers: Arc<BroadcastReceiver<Vec<Node>>>,
         received_rawbytes: Arc<BroadcastReceiver<BroadcastRecvInfo>>,
@@ -302,6 +303,7 @@ declare_counted!(
 impl OverlayShard {
 
     const FLAG_BCAST_ANY_SENDER: i32 = 0x01;
+    const MAX_HOPS: u8 = 15;
     const OPTION_DISABLE_BROADCAST_RETRANSMIT: u32 = 0x01;
     const SIZE_BROADCAST_WAVE: u32 = 20;
     const SPINNER: u64 = 10;              // Milliseconds
@@ -373,11 +375,61 @@ impl OverlayShard {
 
     }
 
+    fn calc_broadcast_neighbours(
+        &self, 
+        hops: Option<u8>,
+        default_neighbours: u8,
+        skip: Option<&Arc<KeyId>>
+    ) -> Result<(Option<u8>, Vec<Arc<KeyId>>)> { 
+        let (hops, neighbours) = if let Some(mut hops) = hops {
+            let initial = (hops >> 4) == 0;
+            if initial {
+                hops |= hops << 4;
+            }
+            let hops_org = hops >> 4;
+            let hops_cur = hops & 0x0F;
+            if hops_org > Self::MAX_HOPS {
+                fail!("Too big hops count requested ({})", hops_org)
+            }
+            if (hops_cur > hops_org) || (hops_cur <= 1) {
+                fail!("Bad hops counter ({:x})", hops)
+            }
+            // Heuristics with zero loss, where n is the number of nodes in network
+            // M3(n) = 3.42 * n^0.287 
+            // M4(n) = 3.86 * n^0.181
+            let n = self.known_peers.count() as f64;
+            let n = if hops_org <= 3 {
+                (n.pow(0.287f64) * 3.42f64).ceil() as u8 
+            } else {
+                (n.pow(0.181f64) * 3.86f64).ceil() as u8
+            };
+            if n > self.neighbours.count() as u8 {
+                if initial {
+                    if hops_org < Self::MAX_HOPS {
+                        hops = ((hops_org + 1) << 4) | (hops_org + 1)
+                    }
+                    (Some(hops), default_neighbours)
+                } else {
+                    (None, default_neighbours)                         
+                }
+            } else {
+                if !initial {
+                    hops = hops - 1;
+                }
+                (Some(hops), n)
+            }
+        } else {
+            (None, default_neighbours)
+        };
+        let neighbours = self.neighbours.random_vec(skip, neighbours as u32);
+        Ok((hops, neighbours))
+    }
+
     fn create_fec_recv_transfer(
         overlay_shard: &Arc<Self>, 
         bcast: &BroadcastFec
     ) -> Result<RecvTransferFec> {
-
+                                                                                                         
         let fec_type = if let FecType::Fec_RaptorQ(fec_type) = &bcast.fec {
             fec_type
         } else {
@@ -536,7 +588,8 @@ impl OverlayShard {
         overlay_shard: &Arc<Self>, 
         data: &TaggedByteSlice, 
         source: &Arc<dyn KeyOption>,
-        overlay_key: &Arc<KeyId>
+        overlay_key: &Arc<KeyId>,
+        hops: Option<u8>
     ) -> Result<BroadcastSendInfo> {
 
         let overlay_shard_clone = overlay_shard.clone();
@@ -613,7 +666,7 @@ impl OverlayShard {
 
         let overlay_shard = overlay_shard.clone();
         let overlay_key = overlay_key.clone();
-        let neighbours = overlay_shard.neighbours.random_vec(None, 5);
+        let (hops, neighbours) = overlay_shard.calc_broadcast_neighbours(hops, 5, None)?;
         let ret = BroadcastSendInfo {
             packets: max_seqno,
             send_to: neighbours.len() as u32
@@ -621,7 +674,10 @@ impl OverlayShard {
 
         tokio::spawn(
             async move {
-                while let Some(buf) = reader.recv().await {
+                while let Some(mut buf) = reader.recv().await {
+                    if let Some(hops) = &hops {
+                        buf.push(*hops)
+                    }
                     if let Err(err) = overlay_shard.distribute_broadcast(
                         &TaggedByteSlice {
                             object: &buf, 
@@ -843,6 +899,7 @@ impl OverlayShard {
         overlay_shard: &Arc<Self>, 
         bcast: BroadcastOrd,
         raw_data: &[u8],
+        check_hops: bool,
         peers: &AdnlPeers
     ) -> Result<()> {
         if overlay_shard.is_broadcast_outdated(bcast.date, peers.other()) {
@@ -902,20 +959,16 @@ impl OverlayShard {
                 recv_from: src_key.id().clone()
             }
         );
-        let options = overlay_shard.options.load(Ordering::Relaxed);
-        if (options & OverlayShard::OPTION_DISABLE_BROADCAST_RETRANSMIT) == 0 {
-            let neighbours = overlay_shard.neighbours.random_vec(Some(peers.other()), 3);
-            // Transit broadcasts will be traced untagged 
-            overlay_shard.distribute_broadcast(
-                &TaggedByteSlice {
-                    object: raw_data, 
-                    #[cfg(feature = "telemetry")]
-                    tag: overlay_shard.tag_broadcast_ord
-                },
-                peers.local(),
-                &neighbours,
-            ).await?;
-        }
+        overlay_shard.resend_broadcast(
+            raw_data,
+            check_hops,
+            peers,
+            3, 
+            #[cfg(feature = "telemetry")]
+            None,
+            #[cfg(feature = "telemetry")]
+            overlay_shard.tag_broadcast_ord
+        ).await?;
         Self::setup_broadcast_purge(overlay_shard, bcast_id);
         Ok(())
     }
@@ -924,6 +977,7 @@ impl OverlayShard {
         overlay_shard: &Arc<Self>, 
         bcast: BroadcastFec,
         raw_data: &[u8],
+        check_hops: bool,
         peers: &AdnlPeers 
     ) -> Result<()> {
         if overlay_shard.is_broadcast_outdated(bcast.date, peers.other()) {
@@ -1019,30 +1073,88 @@ impl OverlayShard {
         if !transfer.completed.load(Ordering::Relaxed) {
             transfer.sender.send(Some(bcast))?;
         }
-        let options = overlay_shard.options.load(Ordering::Relaxed);
-        if (options & OverlayShard::OPTION_DISABLE_BROADCAST_RETRANSMIT) == 0 {
-            let neighbours = overlay_shard.neighbours.random_vec(Some(peers.other()), 5);
+        overlay_shard.resend_broadcast(
+            raw_data,
+            check_hops,
+            peers,
+            5, 
             #[cfg(feature = "telemetry")]
-            stats.val().resent.fetch_add(neighbours.len() as u64, Ordering::Relaxed);
-            // Transit broadcasts will be traced untagged 
-            overlay_shard.distribute_broadcast(
+            Some(stats.val()),
+            #[cfg(feature = "telemetry")]
+            overlay_shard.tag_broadcast_fec
+        ).await
+    }
+
+    async fn resend_broadcast(
+        &self, 
+        raw_data: &[u8],
+        check_hops: bool,
+        peers: &AdnlPeers,
+        neighbours: u8, 
+        #[cfg(feature = "telemetry")]
+        stats: Option<&TransferStats>,
+        #[cfg(feature = "telemetry")]
+        tag: u32
+    ) -> Result<()> {
+        let options = self.options.load(Ordering::Relaxed);
+        if (options & OverlayShard::OPTION_DISABLE_BROADCAST_RETRANSMIT) != 0 {
+            return Ok(())                                                                              
+        }
+        let hops = if check_hops {
+            if raw_data.is_empty() {
+                fail!("Empty broadcast data with hops check")
+            }
+            let hops = raw_data[raw_data.len() - 1]; 
+            if (hops & 0x0F) <= 1 {
+                return Ok(())
+            }
+            Some(hops)
+        } else {
+            None
+        };                          
+        let (hops, neighbours) = self.calc_broadcast_neighbours(
+            hops, 
+            neighbours, 
+            Some(peers.other())
+        )?;
+        #[cfg(feature = "telemetry")]
+        if let Some(stats) = stats {
+            stats.resent.fetch_add(neighbours.len() as u64, Ordering::Relaxed);
+        }
+        // Transit broadcasts will be traced untagged 
+        if let Some(hops) = hops {
+            let len = raw_data.len();
+            let mut buf = Vec::with_capacity(len);
+            buf.extend_from_slice(raw_data);
+            buf[len - 1] = hops;
+            self.distribute_broadcast(
                 &TaggedByteSlice {
-                    object: raw_data, 
+                    object: &buf,
                     #[cfg(feature = "telemetry")]
-                    tag: overlay_shard.tag_broadcast_fec
+                    tag
                 },
                 peers.local(),
                 &neighbours,
-            ).await?;
+            ).await
+        } else {
+            self.distribute_broadcast(
+                &TaggedByteSlice {
+                    object: raw_data, 
+                    #[cfg(feature = "telemetry")]
+                    tag
+                },
+                peers.local(),
+                &neighbours,
+            ).await
         }
-        Ok(())
     }
 
     async fn send_broadcast(
         overlay_shard: &Arc<Self>, 
         data: &TaggedByteSlice<'_>, 
         source: &Arc<dyn KeyOption>,
-        overlay_key: &Arc<KeyId>
+        overlay_key: &Arc<KeyId>,
+        hops: Option<u8>
     ) -> Result<BroadcastSendInfo> {
         let date = Version::get();
         let signature = Self::calc_broadcast_to_sign(data.object, date, [0u8; 32])?;
@@ -1091,7 +1203,10 @@ impl OverlayShard {
         }.into_boxed();
         let mut buf = overlay_shard.message_prefix.clone();
         serialize_boxed_append(&mut buf, &bcast)?;
-        let neighbours = overlay_shard.neighbours.random_vec(None, 3);
+        let (hops, neighbours) = overlay_shard.calc_broadcast_neighbours(hops, 3, None)?;
+        if let Some(hops) = hops {  
+            buf.push(hops);
+        }
         overlay_shard.distribute_broadcast(
             &TaggedByteSlice {
                 object: &buf, 
@@ -1124,14 +1239,15 @@ impl OverlayShard {
         if self.overlay_key.is_some() {
             self.known_peers.random_set(&self.neighbours, None, n)
         } else {
-            self.random_peers.random_set(&self.neighbours, Some(&self.bad_peers), n)
+            self.known_peers.random_set(&self.neighbours, Some(&self.bad_peers), n)
+//            self.random_peers.random_set(&self.neighbours, Some(&self.bad_peers), n)
         }
     }
 
-    fn update_random_peers(&self, n: u32) -> Result<()> {
-        self.known_peers.random_set(&self.random_peers, Some(&self.bad_peers), n)?;
-        self.update_neighbours(OverlayNode::MAX_SHARD_NEIGHBOURS)
-    }
+//    fn update_random_peers(&self, n: u32) -> Result<()> {
+//        self.known_peers.random_set(&self.random_peers, Some(&self.bad_peers), n)?;
+//        self.update_neighbours(OverlayNode::MAX_SHARD_NEIGHBOURS)
+//    }
 
     #[cfg(feature = "telemetry")]
     fn print_stats(&self) -> Result<()> {
@@ -1405,8 +1521,8 @@ impl OverlayNode {
     const MAX_BROADCAST_LOG: u32 = 1000;
     const MAX_PEERS: u32 = 65536;
     const MAX_RANDOM_PEERS: u32 = 4;
-    const MAX_SHARD_NEIGHBOURS: u32 = 5;
-    const MAX_SHARD_PEERS: u32 = 20;
+    const MAX_SHARD_NEIGHBOURS: u32 = 200;
+//    const MAX_SHARD_PEERS: u32 = 20;
     const MAX_SIZE_ORDINARY_BROADCAST: usize = 768;
     const TIMEOUT_GC: u64 = 1000; // Milliseconds
     const TIMEOUT_PEERS: u64 = 60000; // Milliseconds
@@ -1545,9 +1661,9 @@ impl OverlayNode {
         };
         shard.bad_peers.remove(&ret);
         shard.known_peers.put(ret.clone())?;
-        if shard.random_peers.count() < Self::MAX_SHARD_PEERS {
-            shard.random_peers.put(ret.clone())?;
-        }
+//        if shard.random_peers.count() < Self::MAX_SHARD_PEERS {
+//            shard.random_peers.put(ret.clone())?;
+//        }
         if shard.neighbours.count() < Self::MAX_SHARD_NEIGHBOURS {
             shard.neighbours.put(ret.clone())?;
         }  
@@ -1588,16 +1704,17 @@ impl OverlayNode {
         &self,
         overlay_id: &Arc<OverlayShortId>, 
         data: &TaggedByteSlice<'_>, 
-        source: Option<&Arc<dyn KeyOption>>
+        source: Option<&Arc<dyn KeyOption>>,
+        hops: Option<u8>
     ) -> Result<BroadcastSendInfo> {
         log::trace!(target: TARGET, "Broadcast {} bytes", data.object.len());
         let shard = self.get_shard(overlay_id, "Trying broadcast to unknown overlay")?;
         let source = source.unwrap_or(&self.node_key);
         let overlay_key = shard.overlay_key.as_ref().unwrap_or(&self.node_key).id();
         if data.object.len() <= Self::MAX_SIZE_ORDINARY_BROADCAST {
-            OverlayShard::send_broadcast(&shard, data, source, overlay_key).await
+            OverlayShard::send_broadcast(&shard, data, source, overlay_key, hops).await
         } else {
-            OverlayShard::create_fec_send_transfer(&shard, data, source, overlay_key)
+            OverlayShard::create_fec_send_transfer(&shard, data, source, overlay_key, hops)
         }
     } 
 
@@ -1659,8 +1776,11 @@ impl OverlayNode {
             lockfree::set::Insertion::Created => (),
             _ => return Ok(false)
         }
-        if shard.random_peers.contains(peer) {
-            shard.update_random_peers(Self::MAX_SHARD_PEERS)?
+//        if shard.random_peers.contains(peer) {
+//            shard.update_random_peers(Self::MAX_SHARD_PEERS)?
+//        }
+        if shard.neighbours.contains(peer) {
+            shard.update_neighbours(1)?
         }
         // DO NOT DELETE from ADNL, because it may be shared between overlays
         // self.adnl.delete_peer(self.node_key.id(), peer)
@@ -1885,7 +2005,7 @@ impl OverlayNode {
                     purge_broadcasts: lockfree::queue::Queue::new(),
                     purge_broadcasts_count: AtomicU32::new(0),
                     query_prefix: serialize_boxed(&query_prefix)?,
-                    random_peers: AddressCache::with_limit(Self::MAX_SHARD_PEERS),
+  //                  random_peers: AddressCache::with_limit(Self::MAX_SHARD_PEERS),
                     received_catchain,
                     received_peers: Arc::new(
                         BroadcastReceiver {
@@ -1951,12 +2071,13 @@ impl OverlayNode {
                         }
                         timeout_peers += Self::TIMEOUT_GC;
                         if timeout_peers > Self::TIMEOUT_PEERS {
-                            let result = if shard.overlay_key.is_some() {
-                                shard.update_neighbours(1)
-                            } else {
-                                shard.update_random_peers(1)
-                            };
-                            if let Err(e) = result {
+//                            let result = if shard.overlay_key.is_some() {
+//                                shard.update_neighbours(1)
+//                            } else {
+//                                shard.update_random_peers(1)
+//                            };
+//                            if let Err(e) = result {
+                            if let Err(e) = shard.update_neighbours(1) {
                                 log::error!(target: TARGET, "Error: {}", e)
                             }
                             timeout_peers = 0;
@@ -2009,7 +2130,8 @@ impl OverlayNode {
     fn prepare_random_peers(&self, shard: &OverlayShard) -> Result<Nodes> {
         let mut ret = vec![self.sign_local_node(&shard.overlay_id)?];
         let nodes = AddressCache::with_limit(Self::MAX_RANDOM_PEERS);
-        shard.random_peers.random_set(&nodes, None, Self::MAX_RANDOM_PEERS)?;
+//        shard.random_peers.random_set(&nodes, None, Self::MAX_RANDOM_PEERS)?;
+        shard.neighbours.random_set(&nodes, None, Self::MAX_RANDOM_PEERS)?;
         let (mut iter, mut current) = nodes.first();
         while let Some(node) = current {
             if let Some(node) = shard.nodes.get(&node) {
@@ -2099,10 +2221,11 @@ impl Subscriber for OverlayNode {
     }
 
     async fn try_consume_custom(&self, data: &[u8], peers: &AdnlPeers) -> Result<bool> {
-        let mut bundle = deserialize_boxed_bundle(data)?;
+        let (mut bundle, suffix) = deserialize_boxed_bundle_with_suffix(data)?;
         if (bundle.len() < 2) || (bundle.len() > 3) {
             return Ok(false)
         }
+        let have_suffix = suffix < data.len();
         let overlay_id = match bundle.remove(0).downcast::<OverlayMessageBoxed>() {
             Ok(msg) => OverlayShortId::from_data(msg.only().overlay.inner()),
             Err(msg) => {
@@ -2138,11 +2261,23 @@ impl Subscriber for OverlayNode {
             // Public overlay
             match bundle.remove(0).downcast::<Broadcast>() {
                 Ok(Broadcast::Overlay_BroadcastFec(bcast)) => {
-                    OverlayShard::receive_fec_broadcast(&overlay_shard, bcast, data, peers).await?;
+                    OverlayShard::receive_fec_broadcast(
+                        &overlay_shard, 
+                        bcast, 
+                        data, 
+                        have_suffix,
+                        peers
+                    ).await?;
                     Ok(true)
                 },
                 Ok(Broadcast::Overlay_Broadcast(bcast)) => {
-                    OverlayShard::receive_broadcast(&overlay_shard, bcast, data, peers).await?;
+                    OverlayShard::receive_broadcast(
+                        &overlay_shard, 
+                        bcast, 
+                        data, 
+                        have_suffix,
+                        peers
+                    ).await?;
                     Ok(true)
                 },
                 Ok(bcast) => fail!("Unsupported overlay broadcast message {:?}", bcast),
