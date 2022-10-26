@@ -8,6 +8,7 @@ version = '0.6.62'
 
 [workspace]
 
+
 [dependencies]
 async-trait = '0.1'
 base64 = '0.13'
@@ -18,7 +19,7 @@ num-traits = '0.2'
 rand = '0.7'
 sha2 = '0.9'
 adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ton-labs-adnl.git', tag = '0.7.78' }
-ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto.git', tag = '0.1.37' }
+ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto.git', tag = '0.1.38' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
 rldp = { git = 'https://github.com/tonlabs/ton-labs-rldp.git', tag = '0.7.72' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
@@ -29,3 +30,4 @@ ton_types = { git = 'https://github.com/tonlabs/ton-labs-types.git', tag = '1.11
 [features]
 dump = [ 'adnl/dump' ]
 telemetry = [ 'adnl/telemetry', 'rldp/telemetry' ]
+
