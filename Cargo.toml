@@ -24,7 +24,7 @@ lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
 rldp = { git = 'https://github.com/tonlabs/ton-labs-rldp.git', tag = '0.7.73' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
 ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl.git', package = 'ton_api', tag = '0.2.133' }
-ton_block = { git = 'https://github.com/tonlabs/ton-labs-block.git', tag = '1.8.3' }
+ton_block = { git = 'https://github.com/tonlabs/ton-labs-block.git', tag = '1.8.4' }
 ton_types = { git = 'https://github.com/tonlabs/ton-labs-types.git', tag = '1.11.4' }
 
 [features]
