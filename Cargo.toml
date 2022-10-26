@@ -8,6 +8,7 @@ version = '0.6.62'
 
 [workspace]
 
+
 [dependencies]
 async-trait = '0.1'
 base64 = '0.13'
@@ -29,3 +30,4 @@ ton_types = { git = 'https://github.com/tonlabs/ton-labs-types.git', tag = '1.11
 [features]
 dump = [ 'adnl/dump' ]
 telemetry = [ 'adnl/telemetry', 'rldp/telemetry' ]
+
