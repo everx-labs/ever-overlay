@@ -4,7 +4,7 @@ description = 'Overlay protocol library'
 edition = '2018'
 name = 'overlay'
 resolver = '2'
-version = '0.6.69'
+version = '0.6.70'
 
 [workspace]
 
@@ -30,3 +30,4 @@ ton_types = { git = 'https://github.com/tonlabs/ton-labs-types.git', tag = '1.11
 [features]
 dump = [ 'adnl/dump' ]
 telemetry = [ 'adnl/telemetry', 'rldp/telemetry' ]
+
