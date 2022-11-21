@@ -55,6 +55,7 @@ use ton_api::{
         pub_::publickey::{Ed25519, Overlay}, 
         rpc::overlay::{GetRandomPeers, Query as OverlayQuery}, 
         ton_node::shardpublicoverlayid::ShardPublicOverlayId,
+        ton_node::BlockCandidateStatus,
         validator_session::{
             BlockUpdate as ValidatorSessionBlockUpdateBoxed, 
             blockupdate::BlockUpdate as ValidatorSessionBlockUpdate
@@ -226,6 +227,9 @@ type BroadcastId = [u8; 32];
 type CatchainReceiver = BroadcastReceiver<
     (CatchainBlockUpdate, ValidatorSessionBlockUpdate, Arc<KeyId>)
 >;
+type BlockCandidateStatusReceiver = BroadcastReceiver<
+    (BlockCandidateStatus, Arc<KeyId>)
+>;
 
 enum OwnedBroadcast {
     Other,
@@ -272,6 +276,7 @@ declare_counted!(
         query_prefix: Vec<u8>,
 //        random_peers: AddressCache,
         received_catchain: Option<Arc<CatchainReceiver>>,
+        received_block_status: Option<Arc<BlockCandidateStatusReceiver>>,
         received_peers: Arc<BroadcastReceiver<Vec<Node>>>,
         received_rawbytes: Arc<BroadcastReceiver<BroadcastRecvInfo>>,
         #[cfg(feature = "telemetry")]
@@ -1953,6 +1958,17 @@ impl OverlayNode {
             )?.pop().await
     }
 
+    /// Wait for block candidate status
+    pub async fn wait_for_block_candidate_status(
+        &self, 
+        overlay_id: &Arc<OverlayShortId>
+    ) -> Result<Option<(BlockCandidateStatus, Arc<KeyId>)>> {
+        self.get_shard(overlay_id, "Waiting for block candidate status in unknown overlay")?
+            .received_block_status.as_ref().ok_or_else(
+                || error!("Waiting for block candidate status in public overlay {}", overlay_id)
+            )?.pop().await
+    }
+
     /// Wait for peers
     pub async fn wait_for_peers(
         &self, 
@@ -1991,6 +2007,18 @@ impl OverlayNode {
                 } else {
                     None
                 };
+                let received_block_status = if overlay_key.is_some() {
+                    let received_block_status = Arc::new(
+                        BroadcastReceiver {
+                            data: lockfree::queue::Queue::new(),
+                            subscribers: lockfree::queue::Queue::new(),
+                            synclock: AtomicU32::new(0)
+                        }
+                    );
+                    Some(received_block_status)
+                } else {
+                    None
+                };
                 let shard = OverlayShard {
                     adnl: self.adnl.clone(),
                     bad_peers: lockfree::set::Set::new(),
@@ -2007,6 +2035,7 @@ impl OverlayNode {
                     query_prefix: serialize_boxed(&query_prefix)?,
   //                  random_peers: AddressCache::with_limit(Self::MAX_SHARD_PEERS),
                     received_catchain,
+                    received_block_status,
                     received_peers: Arc::new(
                         BroadcastReceiver {
                             data: lockfree::queue::Queue::new(),
@@ -2105,6 +2134,9 @@ impl OverlayNode {
                 }
                 if let Some(received_catchain) = shard.received_catchain.as_ref() {
                     BroadcastReceiver::stop(received_catchain)
+                }
+                if let Some(received_block_status) = shard.received_block_status.as_ref() {
+                    BroadcastReceiver::stop(received_block_status)
                 }
             } else if shard.overlay_key.is_some() {
                 fail!("Try to delete private overlay {} as public", overlay_id)
@@ -2258,8 +2290,26 @@ impl Subscriber for OverlayNode {
             );
             Ok(true)
         } else {
+            let message = bundle.remove(0);
+
+            // SMFT
+            let message = match message.downcast::<BlockCandidateStatus>() {
+                Ok(block_status) => {
+                    let receiver = overlay_shard.received_block_status.as_ref().ok_or_else(
+                        || error!("No block candidate status receiver in private overlay {}", overlay_id)
+                    )?;
+                    BroadcastReceiver::push(
+                        receiver, 
+                        (block_status, peers.other().clone())
+                    );
+
+                    return Ok(true);
+                }
+                Err(message) => message,
+            };
+
             // Public overlay
-            match bundle.remove(0).downcast::<Broadcast>() {
+            let message = match message.downcast::<Broadcast>() {
                 Ok(Broadcast::Overlay_BroadcastFec(bcast)) => {
                     OverlayShard::receive_fec_broadcast(
                         &overlay_shard, 
@@ -2268,7 +2318,7 @@ impl Subscriber for OverlayNode {
                         have_suffix,
                         peers
                     ).await?;
-                    Ok(true)
+                    return Ok(true)
                 },
                 Ok(Broadcast::Overlay_Broadcast(bcast)) => {
                     OverlayShard::receive_broadcast(
@@ -2278,11 +2328,14 @@ impl Subscriber for OverlayNode {
                         have_suffix,
                         peers
                     ).await?;
-                    Ok(true)
+                    return Ok(true)
                 },
                 Ok(bcast) => fail!("Unsupported overlay broadcast message {:?}", bcast),
-                Err(msg) => fail!("Unsupported overlay message {:?}", msg)
-            }
+                Err(message) => message,
+            };
+
+            // Unknown message
+            fail!("Unsupported overlay message {:?}", message)
         }
     }
 
