@@ -211,7 +211,7 @@ impl OverlayUtils {
             id: AdnlShortId {
                 id: UInt256::with_array(*key.id().data())
             },
-            overlay: node.overlay,
+            overlay: node.overlay.clone(),
             version: node.version 
         }.into_boxed();    
         if let Err(e) = key.verify(&serialize_boxed(&node_to_sign)?, &node.signature) {
@@ -437,7 +437,7 @@ impl OverlayShard {
         };
 
         let overlay_shard_recv = overlay_shard.clone();
-        let bcast_id_recv = bcast.data_hash.inner();
+        let bcast_id_recv = bcast.data_hash.as_array().clone();
         let (sender, mut reader) = tokio::sync::mpsc::unbounded_channel();
         let mut decoder = RaptorqDecoder::with_params(fec_type.clone());
         let overlay_shard_wait = overlay_shard_recv.clone();
