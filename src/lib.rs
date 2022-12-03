@@ -65,6 +65,8 @@ use ton_api::{
 use ton_api::{BoxedSerialize, tag_from_boxed_type, tag_from_bare_type};
 use ton_types::{error, fail, Result, UInt256};
 
+include!("../common/src/info.rs");
+
 const TARGET: &str = "overlay";
 const TARGET_BROADCAST: &str = "overlay_broadcast";
 

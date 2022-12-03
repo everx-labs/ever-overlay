@@ -1,10 +1,9 @@
 [package]
 build = './common/build/build.rs'
 description = 'Overlay protocol library'
-edition = '2018'
+edition = '2021'
 name = 'overlay'
-resolver = '2'
-version = '0.6.101'
+version = '0.6.102'
 
 [workspace]
 
