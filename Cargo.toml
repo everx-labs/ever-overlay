@@ -3,7 +3,7 @@ build = './common/build/build.rs'
 description = 'Overlay protocol library'
 edition = '2021'
 name = 'overlay'
-version = '0.6.114'
+version = '0.6.115'
 
 [workspace]
 
@@ -17,13 +17,13 @@ log = '0.4'
 num-traits = '0.2'
 rand = '0.7'
 sha2 = '0.9'
-adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ton-labs-adnl.git', tag = '0.7.119' }
-ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto.git', tag = '0.1.80' }
+adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ton-labs-adnl.git', tag = '0.7.120' }
+ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto.git', tag = '0.1.81' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-rldp = { git = 'https://github.com/tonlabs/ton-labs-rldp.git', tag = '0.7.115' }
+rldp = { git = 'https://github.com/tonlabs/ton-labs-rldp.git', tag = '0.7.116' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
-ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl.git', package = 'ton_api', tag = '0.2.167' }
-ton_block = { git = 'https://github.com/tonlabs/ton-labs-block.git', tag = '1.9.18' }
+ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl.git', package = 'ton_api', tag = '0.2.168' }
+ton_block = { git = 'https://github.com/tonlabs/ton-labs-block.git', tag = '1.9.19' }
 ton_types = { git = 'https://github.com/tonlabs/ton-labs-types.git', tag = '1.12.6' }
 
 [features]
