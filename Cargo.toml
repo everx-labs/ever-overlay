@@ -1,10 +1,9 @@
 [package]
 build = './common/build/build.rs'
 description = 'Overlay protocol library'
-edition = '2018'
+edition = '2021'
 name = 'overlay'
-resolver = '2'
-version = '0.6.69'
+version = '0.6.124'
 
 [workspace]
 
@@ -18,21 +17,25 @@ log = '0.4'
 num-traits = '0.2'
 rand = '0.7'
 sha2 = '0.9'
-adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ton-labs-adnl.git', tag = '0.7.77' }
+adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.7.131' }
 ever-crypto = { git = 'https://github.com/tonlabs/ever-labs-crypto', branch = 'consensus-updates' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-rldp = { git = 'https://github.com/tonlabs/ton-labs-rldp.git', tag = '0.7.71' }
+rldp = { git = 'https://github.com/tonlabs/ton-labs-rldp.git', tag = '0.7.125' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
-ton_api = { git = 'https://github.com/tonlabs/ton-labs-tl.git', package = 'ton_api', branch = 'consensus-updates' }
-ton_block = { git = 'https://github.com/tonlabs/ton-labs-block.git', branch = 'consensus-updates' }
-ton_types = { git = 'https://github.com/tonlabs/ton-labs-types.git', tag = '1.11.4' }
+ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', branch = 'consensus-updates' }
+ton_block = { git = 'https://github.com/tonlabs/ever-block.git', branch = 'consensus-updates' }
+ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '1.12.7' }
 
 [features]
 dump = [ 'adnl/dump' ]
 telemetry = [ 'adnl/telemetry', 'rldp/telemetry' ]
 
-[patch.'https://github.com/tonlabs/ton-labs-tl']
-ton_api = { git = 'https://github.com:443//tonlabs/ton-labs-tl', package = 'ton_api', branch = 'consensus-updates' }
+[patch.'https://github.com/tonlabs/ever-tl']
+ton_api = { git = 'https://github.com:443//tonlabs/ever-tl', package = 'ton_api', branch = 'consensus-updates' }
 
 [patch.'https://github.com/tonlabs/ever-labs-crypto']
-ever-crypto = { git = 'https://github.com:443//tonlabs/ever-labs-crypto', branch = 'consensus-updates' }
+ever-crypto = { git = 'https://github.com:443//tonlabs/ever-crypto', branch = 'consensus-updates' }
+
+[patch.'https://github.com/tonlabs/ever-crypto']
+ever-crypto = { git = 'https://github.com:443//tonlabs/ever-crypto', branch = 'consensus-updates' }
+
