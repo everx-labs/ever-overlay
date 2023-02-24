@@ -748,7 +748,7 @@ impl Overlay {
             };
             #[cfg(feature = "telemetry")]
             addrs.push(format!("{}", peers.other()));
-            if let Err(e) = self.adnl.send_custom(data, peers.clone()) {
+            if let Err(e) = self.adnl.send_custom(data, &peers) {
                 log::warn!(
                     target: TARGET,
                     "Cannot distribute broadcast in overlay {} to {}: {}",
@@ -1884,7 +1884,7 @@ impl OverlayNode {
                 #[cfg(feature = "telemetry")]
                 tag: data.tag
             },
-            peers
+            &peers
         )
     }
 
