@@ -12,7 +12,7 @@ Overlay protocol implementation
 
 ## About
 
-Implementation of Overlay Protocol (RLDP) in safe Rust. Overlay is a protocol that runs on top of ADNL UDP, which is responsible for dividing a single network into additional subnetworks (overlays). Overlays can be both public, to which anyone can connect, and private, where additional credentials is needed for entry, known only to a certain amount of participants.
+Implementation of Overlay protocol in safe Rust. Overlay protocol runs on top of ADNL UDP, and it is responsible for dividing a single network into additional subnetworks (overlays). Overlays can be both public, to which anyone can connect, and private, where additional credentials is needed for entry, known only to a certain amount of participants.
 
 ## Getting Started
 
