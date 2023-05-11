@@ -17,14 +17,14 @@ log = '0.4'
 num-traits = '0.2'
 rand = '0.7'
 sha2 = '0.9'
-adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.7.152' }
-ever-crypto = { git = 'https://github.com/tonlabs/ever-crypto.git', tag = '0.1.110' }
+adnl = { features = [ 'node' ], git = 'ssh://git@github.com/tonlabs/ever-adnl.git', tag = 'tag-test-ci-pipeline' }
+ever-crypto = { git = 'ssh://git@github.com/tonlabs/ever-crypto.git', tag = 'tag-test-ci-pipeline' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-rldp = { git = 'https://github.com/tonlabs/ever-rldp.git', tag = '0.7.148' }
+rldp = { git = 'ssh://git@github.com/tonlabs/ever-rldp.git', tag = 'tag-test-ci-pipeline' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
-ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.2.197' }
-ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.48' }
-ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.4' }
+ton_api = { git = 'ssh://git@github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = 'tag-test-ci-pipeline' }
+ton_block = { git = 'ssh://git@github.com/tonlabs/ever-block.git', tag = 'tag-test-ci-pipeline' }
+ton_types = { git = 'ssh://git@github.com/tonlabs/ever-types.git', tag = 'tag-test-ci-pipeline' }
 
 [features]
 dump = [ 'adnl/dump' ]
