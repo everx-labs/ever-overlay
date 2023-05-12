@@ -3,7 +3,7 @@ build = './common/build/build.rs'
 description = 'Overlay protocol library'
 edition = '2021'
 name = 'overlay'
-version = '0.6.150'
+version = '0.6.152'
 
 [workspace]
 
@@ -17,14 +17,14 @@ log = '0.4'
 num-traits = '0.2'
 rand = '0.7'
 sha2 = '0.9'
-adnl = { features = [ 'node' ], git ='https://github.com/tonlabs/ever-adnl.git' }
-ever-crypto = { git ='https://github.com/tonlabs/ever-crypto.git' }
+adnl = { features = [ 'node' ], git = 'ssh://git@github.com/tonlabs/ever-adnl-private.git' }
+ever-crypto = { git = 'ssh://git@github.com/tonlabs/ever-crypto-private.git' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-rldp = { git ='https://github.com/tonlabs/ever-rldp.git' }
+rldp = { git = 'ssh://git@github.com/tonlabs/ever-rldp-private.git' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
-ton_api = { git ='https://github.com/tonlabs/ever-tl.git', package = 'ton_api' }
-ton_block = { git ='https://github.com/tonlabs/ever-block.git' }
-ton_types = { git ='https://github.com/tonlabs/ever-types.git' }
+ton_api = { git = 'ssh://git@github.com/tonlabs/ever-tl-private.git', package = 'ton_api' }
+ton_block = { git = 'ssh://git@github.com/tonlabs/ever-block-private.git' }
+ton_types = { git = 'ssh://git@github.com/tonlabs/ever-types-private.git' }
 
 [features]
 dump = [ 'adnl/dump' ]
