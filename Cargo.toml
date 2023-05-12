@@ -1,30 +1,32 @@
 [package]
-edition = "2018"
-build = "./common/build/build.rs"
-name = "dht"
-version = "0.0.1"
-description = "DHT protocol library"
+build = './common/build/build.rs'
+description = 'Overlay protocol library'
+edition = '2021'
+name = 'overlay'
+version = '0.6.150'
+
+[workspace]
+
 
 [dependencies]
-adnl = { git = "ssh://git@github.com/tonlabs/adnl", package = "adnl", features = ["node", "test"] }
-failure = "0.1.6"
-hex = "^0"
-ton_api = { git = "ssh://git@github.com/tonlabs/TON-Transport.git", branch = "feature/manual/13.01.2020", package = "ton_api" }
-log = "0.4.8"
-rand = "0.7.2"
-tokio = { version = "0.2.5", features = ["rt-threaded", "stream", "tcp", "udp"] }
-#rustc-serialize = "^0.3"
-
-[dev-dependencies]
-arrayref = "0.3.5"
-base64 = "0.11.0"
-ed25519-dalek = "1.0.0-pre.3"
-hex = "^0"
-log4rs = "0.8.3"
-sha2 = "0.8.0"
+async-trait = '0.1'
+base64 = '0.13'
+failure = '0.1'
+hex = '0.4'
+log = '0.4'
+num-traits = '0.2'
+rand = '0.7'
+sha2 = '0.9'
+adnl = { features = [ 'node' ], git ='https://github.com/tonlabs/ever-adnl.git' }
+ever-crypto = { git ='https://github.com/tonlabs/ever-crypto.git' }
+lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
+rldp = { git ='https://github.com/tonlabs/ever-rldp.git' }
+tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
+ton_api = { git ='https://github.com/tonlabs/ever-tl.git', package = 'ton_api' }
+ton_block = { git ='https://github.com/tonlabs/ever-block.git' }
+ton_types = { git ='https://github.com/tonlabs/ever-types.git' }
 
 [features]
-test = []
+dump = [ 'adnl/dump' ]
+telemetry = [ 'adnl/telemetry', 'rldp/telemetry' ]
 
-[replace]
-"ssh://git@github.com/tonlabs/adnl#0.0.5" = { path = "../adnl" }	
