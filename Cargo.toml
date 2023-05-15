@@ -17,14 +17,14 @@ log = '0.4'
 num-traits = '0.2'
 rand = '0.7'
 sha2 = '0.9'
-adnl = { features = [ 'node' ], git = 'ssh://git@github.com/tonlabs/ever-adnl-private.git' }
-ever-crypto = { git = 'ssh://git@github.com/tonlabs/ever-crypto-private.git' }
+adnl = { features = [ 'node' ], git = 'ssh://git@github.com/tonlabs/ever-adnl-venom.git' }
+ever-crypto = { git = 'ssh://git@github.com/tonlabs/ever-crypto-venom.git' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-rldp = { git = 'ssh://git@github.com/tonlabs/ever-rldp-private.git' }
+rldp = { git = 'ssh://git@github.com/tonlabs/ever-rldp-venom.git' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
-ton_api = { git = 'ssh://git@github.com/tonlabs/ever-tl-private.git', package = 'ton_api' }
-ton_block = { git = 'ssh://git@github.com/tonlabs/ever-block-private.git' }
-ton_types = { git = 'ssh://git@github.com/tonlabs/ever-types-private.git' }
+ton_api = { git = 'ssh://git@github.com/tonlabs/ever-tl-venom.git', package = 'ton_api' }
+ton_block = { git = 'ssh://git@github.com/tonlabs/ever-block-venom.git' }
+ton_types = { git = 'ssh://git@github.com/tonlabs/ever-types-venom.git' }
 
 [features]
 dump = [ 'adnl/dump' ]
