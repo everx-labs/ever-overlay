@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.6.181
+
+- Yet more stabilize verification
+- Increase package version
+
 ## Version 0.6.180
 
 - Use network config for evaluation
