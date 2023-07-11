@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version: 0.6.205
+
+- Do not use base64, crypto crates directly
+
 ## Version 0.6.187
 
 - Use externally managed port

@@ -1,5 +1,5 @@
 /*
-* Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+* Copyright (C) 2019-2023 EverX. All Rights Reserved.
 *
 * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
 * this file except in compliance with the License.
@@ -22,7 +22,6 @@ use adnl::{
 };
 #[cfg(feature = "telemetry")]
 use adnl::telemetry::Metric;
-use ever_crypto::{Ed25519KeyOption, KeyId, KeyOption, sha256_digest};
 use num_traits::pow::Pow;
 use rldp::{RaptorqDecoder, RaptorqEncoder, RldpNode};
 use std::{
@@ -34,8 +33,7 @@ use std::time::Instant;
 use ton_api::{
     deserialize_boxed_bundle_with_suffix, IntoBoxed, serialize_boxed, serialize_boxed_append, 
     ton::{
-        self, TLObject, 
-        adnl::id::short::Short as AdnlShortId, 
+        TLObject, adnl::id::short::Short as AdnlShortId, 
         catchain::{
             FirstBlock as CatchainFirstBlock, Update as CatchainBlockUpdateBoxed, 
             blockupdate::BlockUpdate as CatchainBlockUpdate
@@ -63,7 +61,10 @@ use ton_api::{
 };
 #[cfg(feature = "telemetry")]
 use ton_api::{BoxedSerialize, tag_from_boxed_type, tag_from_bare_type};
-use ton_types::{error, fail, Result, UInt256};
+use ton_types::{
+    error, fail, 
+    base64_decode, base64_encode, KeyId, KeyOption, Result, sha256_digest, UInt256
+};
 
 include!("../common/src/info.rs");
 
@@ -76,19 +77,19 @@ pub fn build_overlay_node_info(
     key: &str, 
     signature: &str
 ) -> Result<Node> {
-    let key = base64::decode(key)?;
+    let key = base64_decode(key)?;
     if key.len() != 32 {
         fail!("Bad public key length")
     }
     let key: [u8; 32] = key.as_slice().try_into()?;
-    let signature = base64::decode(signature)?;
+    let signature = base64_decode(signature)?;
     let node = Node {
         id: Ed25519 {
             key: UInt256::with_array(key)
         }.into_boxed(),
         overlay: UInt256::with_array(*overlay.data()),
         version,
-        signature: ton::bytes(signature)
+        signature: signature.into()
     };
     Ok(node)
 }
@@ -184,9 +185,7 @@ impl OverlayUtils {
         zero_state_file_hash: &[u8; 32]
     ) -> Result<Arc<OverlayShortId>> {
         let overlay_key = OverlayKey {
-            name: ton::bytes(
-                Self::calc_overlay_id(workchain, shard, zero_state_file_hash)?.to_vec()
-            )
+            name: Self::calc_overlay_id(workchain, shard, zero_state_file_hash)?.to_vec().into()
         };
         Ok(OverlayShortId::from_data(hash(overlay_key)?))
     }
@@ -197,7 +196,7 @@ impl OverlayUtils {
     ) -> Result<Arc<PrivateOverlayShortId>> {
         let serialized_first_block = serialize_boxed(first_block)?;
         let overlay_key = OverlayKey { 
-            name : serialized_first_block.into() 
+            name: serialized_first_block.into() 
         };
         let id = hash_boxed(&overlay_key.into_boxed())?;
         Ok(PrivateOverlayShortId::from_data(id))
@@ -205,12 +204,12 @@ impl OverlayUtils {
 
     /// Verify node info
     pub fn verify_node(overlay_id: &Arc<OverlayShortId>, node: &Node) -> Result<()> {
-        let key = Ed25519KeyOption::from_public_key_tl(&node.id)?;
+        let key: Arc<dyn KeyOption> = (&node.id).try_into()?;
         if node.overlay.as_slice() != overlay_id.data() {
             fail!(
                 "Got peer {} with wrong overlay {}, expected {}",
                 key.id(),
-                base64::encode(node.overlay.as_slice()),
+                base64_encode(node.overlay.as_slice()),
                 overlay_id
             )
         }
@@ -319,7 +318,7 @@ impl Overlay {
     const TIMEOUT_BROADCAST: u64 = 60;    // Seconds
 
     fn calc_broadcast_id(&self, data: &[u8]) -> Result<Option<BroadcastId>> {
-        let bcast_id: [u8; 32] = sha256_digest(data);
+        let bcast_id = sha256_digest(data);
         let added = add_unbound_object_to_map(
             &self.owned_broadcasts,
             bcast_id,
@@ -333,7 +332,7 @@ impl Overlay {
     }
 
     fn calc_broadcast_to_sign(data: &[u8], date: i32, src: [u8; 32]) -> Result<Vec<u8>> { 
-        let data_hash: [u8; 32] = sha256_digest(data);
+        let data_hash = sha256_digest(data);
         let bcast_id = BroadcastOrdId {
             src: UInt256::with_array(src),
             data_hash: UInt256::with_array(data_hash),
@@ -423,7 +422,7 @@ impl Overlay {
                 }
             } else {
                 if !initial {
-                    hops = hops - 1;
+                    hops -= 1;
                 }
                 (Some(hops), n)
             }
@@ -451,7 +450,8 @@ impl Overlay {
         let mut decoder = RaptorqDecoder::with_params(fec_type.clone());
         let overlay_wait = overlay_recv.clone();
         let bcast_id_wait = bcast_id_recv;
-        let source = Ed25519KeyOption::from_public_key_tl(&bcast.src)?.id().clone();
+        let source: Arc<dyn KeyOption> = (&bcast.src).try_into()?;
+        let source = source.id().clone();
         let source_recv = source.clone();
         let bcast_data_size = bcast.data_size;
 
@@ -520,7 +520,7 @@ impl Overlay {
                             log::error!(  
                                 target: TARGET, 
                                 "INTERNAL ERROR: recv FEC broadcast {} mismatch in overlay {}",
-                                base64::encode(&bcast_id_recv),
+                                base64_encode(&bcast_id_recv),
                                 overlay_recv.overlay_id
                             )
                         }
@@ -550,7 +550,7 @@ impl Overlay {
                                 log::warn!(  
                                     target: TARGET, 
                                     "FEC broadcast {} ({} bytes) dropped incompleted by timeout",
-                                    base64::encode(&bcast_id_wait),
+                                    base64_encode(&bcast_id_wait),
                                     bcast_data_size
                                 )
                             }
@@ -560,7 +560,7 @@ impl Overlay {
                             log::error!(  
                                 target: TARGET, 
                                 "INTERNAL ERROR: recv FEC broadcast {} mismatch in overlay {}",
-                                base64::encode(&bcast_id_wait),
+                                base64_encode(&bcast_id_wait),
                                 overlay_wait.overlay_id
                             )
                         }
@@ -637,7 +637,7 @@ impl Overlay {
         log::info!(
             target: TARGET_BROADCAST,
             "Broadcast trace: send FEC {} {} bytes, tag {:08x} to overlay {}",
-            base64::encode(&bcast_id),  
+            base64_encode(&bcast_id),  
             data.len(),
             tag,
             overlay.overlay_id
@@ -747,8 +747,8 @@ impl Overlay {
                 peers.get_or_insert_with(|| AdnlPeers::with_keys(key.clone(), neighbour.clone()))
             };
             #[cfg(feature = "telemetry")]
-            addrs.push(format!("{}", peers.other()));
-            if let Err(e) = self.adnl.send_custom(data, &peers) {
+            addrs.push(peers.other().to_string());
+            if let Err(e) = self.adnl.send_custom(data, peers) {
                 log::warn!(
                     target: TARGET,
                     "Cannot distribute broadcast in overlay {} to {}: {}",
@@ -804,16 +804,16 @@ impl Overlay {
         let signature = key.sign(&signature)?;
 
         let bcast = BroadcastFec {
-            src: key.into_public_key_tl()?,
+            src: key.try_into()?,
             certificate: OverlayCertificate::Overlay_EmptyCertificate,
             data_hash: UInt256::with_array(transfer.bcast_id),
             data_size: transfer.encoder.params().data_size, 
             flags: Self::FLAG_BCAST_ANY_SENDER,
-            data: ton::bytes(chunk),
+            data: chunk.into(),
             seqno: transfer.seqno as i32, 
             fec: transfer.encoder.params().clone().into_boxed(),
             date,
-            signature: ton::bytes(signature.to_vec())
+            signature: signature.into()
         }.into_boxed();
 
         transfer.seqno += 1;
@@ -834,7 +834,7 @@ impl Overlay {
             fail!("Unsupported FEC type")
         };
 
-        let src_key = Ed25519KeyOption::from_public_key_tl(&bcast.src)?;
+        let src_key: Arc<dyn KeyOption> = (&bcast.src).try_into()?;
         let src = if (bcast.flags & Self::FLAG_BCAST_ANY_SENDER) != 0 {
             [0u8; 32]
         } else {
@@ -852,7 +852,7 @@ impl Overlay {
             bcast.seqno,
             src
         )?;
-        src_key.verify(&signature, &bcast.signature.0)?;
+        src_key.verify(&signature, &bcast.signature)?;
 
         if let Some(ret) = decoder.decode(bcast.seqno as u32, &bcast.data) {
             let ret = if ret.len() != bcast.data_size as usize {
@@ -872,8 +872,8 @@ impl Overlay {
                     if test_id != *bcast_id {
                         fail!(
                             "Expected {} broadcast hash, but received {}",
-                            base64::encode(test_id), 
-                            base64::encode(bcast_id)
+                            base64_encode(test_id), 
+                            base64_encode(bcast_id)
                         )
                     }
                 }
@@ -882,7 +882,7 @@ impl Overlay {
                     log::warn!(
                         target: TARGET,
                         "Received overlay broadcast {} ({} bytes) in {} seconds",
-                        base64::encode(bcast_id),
+                        base64_encode(bcast_id),
                         ret.len(),
                         delay
                     )
@@ -890,7 +890,7 @@ impl Overlay {
                     log::trace!(
                         target: TARGET,
                         "Received overlay broadcast {} ({} bytes) in {} seconds",
-                        base64::encode(bcast_id), 
+                        base64_encode(bcast_id), 
                         ret.len(),
                         delay
                     )
@@ -914,18 +914,18 @@ impl Overlay {
         if overlay.is_broadcast_outdated(bcast.date, peers.other()) {
             return Ok(())
         }
-        let src_key = Ed25519KeyOption::from_public_key_tl(&bcast.src)?;
+        let src_key: Arc<dyn KeyOption> = (&bcast.src).try_into()?;
         let src = if (bcast.flags & Self::FLAG_BCAST_ANY_SENDER) != 0 {
             [0u8; 32]
         } else {
             *src_key.id().data()
         };
-        let ton::bytes(data) = bcast.data;
+        let data: Vec<u8> = bcast.data.into();
         let (data, mut bcast_id, check) = match DataCompression::decompress(&data) {
             Some(maybe) => {
-                let signature = Self::calc_broadcast_to_sign(&maybe[..], bcast.date, src)?;
+                let signature = Self::calc_broadcast_to_sign(&maybe, bcast.date, src)?;
                 match overlay.calc_broadcast_id(&signature)? {
-                    Some(bcast_id) => match src_key.verify(&signature, &bcast.signature.0) {
+                    Some(bcast_id) => match src_key.verify(&signature, &bcast.signature) {
                         Ok(_) => {
                             overlay.adnl.set_options(AdnlNode::OPTION_FORCE_COMPRESSION);
                             (maybe, Some(bcast_id), false)
@@ -941,7 +941,7 @@ impl Overlay {
             let signature = Self::calc_broadcast_to_sign(&data[..], bcast.date, src)?;
             bcast_id = overlay.calc_broadcast_id(&signature)?;
             if bcast_id.is_some() {
-                src_key.verify(&signature, &bcast.signature.0)?
+                src_key.verify(&signature, &bcast.signature)?
             }
         }
         let bcast_id = match bcast_id {
@@ -954,7 +954,7 @@ impl Overlay {
             log::info!(
                 target: TARGET_BROADCAST,
                 "Broadcast trace: recv ordinary {} {} bytes, tag {:08x} to overlay {}",
-                base64::encode(&bcast_id),  
+                base64_encode(&bcast_id),  
                 data.len(),
                 u32::from_le_bytes([data[0], data[1], data[2], data[3]]),
                 overlay.overlay_id
@@ -997,7 +997,7 @@ impl Overlay {
         log::info!(
             target: TARGET_BROADCAST,
             "Broadcast trace: recv FEC {} {} bytes to overlay {}",
-            base64::encode(bcast_id),  
+            base64_encode(bcast_id),  
             raw_data.len(),
             overlay.overlay_id
         );
@@ -1053,7 +1053,7 @@ impl Overlay {
                 log::error!(  
                     target: TARGET, 
                     "INTERNAL ERROR: recv FEC broadcast {} creation mismatch in overlay {}",
-                    base64::encode(bcast_id),
+                    base64_encode(bcast_id),
                     overlay.overlay_id
                 )
             }
@@ -1066,11 +1066,12 @@ impl Overlay {
             return Ok(())
         };
         transfer.updated_at.refresh();
-        if &transfer.source != Ed25519KeyOption::from_public_key_tl(&bcast.src)?.id() {
+        let src_key: Arc<dyn KeyOption> = (&bcast.src).try_into()?;
+        if &transfer.source != src_key.id() {
             log::warn!(
                 target: TARGET, 
                 "Same broadcast {} but parts from different sources",
-                base64::encode(bcast_id)
+                base64_encode(bcast_id)
             );
             return Ok(())
         }
@@ -1191,7 +1192,7 @@ impl Overlay {
         log::info!(
             target: TARGET_BROADCAST,
             "Broadcast trace: send ordinary {} {} bytes, tag {:08x} to overlay {}",
-            base64::encode(&bcast_id),  
+            base64_encode(&bcast_id),  
             data.object.len(),
             data.tag,
             overlay.overlay_id
@@ -1203,12 +1204,12 @@ impl Overlay {
         };
         let signature = source.sign(&signature)?;
         let bcast = BroadcastOrd {
-            src: source.into_public_key_tl()?,
+            src: source.try_into()?,
             certificate: OverlayCertificate::Overlay_EmptyCertificate,
             flags: Self::FLAG_BCAST_ANY_SENDER,
-            data: ton::bytes(data_body),
+            data: data_body.into(),
             date,
-            signature: ton::bytes(signature.to_vec())
+            signature: signature.into()
         }.into_boxed();
         let mut buf = overlay.message_prefix.clone();
         serialize_boxed_append(&mut buf, &bcast)?;
@@ -1324,7 +1325,7 @@ impl Overlay {
             log::info!(
                 target: TARGET, 
                 "  ** OVERLAY STAT resend transfer {}: -> {} / {} -> {}", 
-                base64::encode(transfer.key()), 
+                base64_encode(transfer.key()), 
                 transfer.val().income.load(Ordering::Relaxed),
                 transfer.val().passed.load(Ordering::Relaxed),
                 transfer.val().resent.load(Ordering::Relaxed)
@@ -1661,7 +1662,7 @@ impl OverlayNode {
         let ret = self.adnl.add_peer(
             self.node_key.id(), 
             peer_ip_address, 
-            &Ed25519KeyOption::from_public_key_tl(&peer.id)?
+            &((&peer.id).try_into()?)
         )?;
         let ret = if let Some(ret) = ret {
             ret
@@ -2194,7 +2195,8 @@ impl OverlayNode {
         log::trace!(target: TARGET, "-------- Got random peers:");
         let mut peers = peers.nodes.0;
         while let Some(peer) = peers.pop() {
-            if self.node_key.id().data() == Ed25519KeyOption::from_public_key_tl(&peer.id)?.id().data() {
+            let other_key: Arc<dyn KeyOption> = (&peer.id).try_into()?;
+            if self.node_key.id().data() == other_key.id().data() {
                 continue
             }
             log::trace!(target: TARGET, "{:?}", peer);
@@ -2234,9 +2236,9 @@ impl OverlayNode {
             version 
         }.into_boxed();
         let local_node = Node {
-            id: key.into_public_key_tl()?,
+            id: key.try_into()?,
             overlay: UInt256::with_array(*overlay_id.data()),
-            signature: ton::bytes(key.sign(&serialize_boxed(&local_node)?)?.to_vec()),
+            signature: key.sign(&serialize_boxed(&local_node)?)?.into(),
             version
         };     
         Ok(local_node)
