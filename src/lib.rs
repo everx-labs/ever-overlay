@@ -325,7 +325,8 @@ impl Overlay {
             &self.owned_broadcasts, 
             bcast_id,
             |found| match found {
-                None | Some(OwnedBroadcast::Other) if allow_dup => Ok(Some(OwnedBroadcast::Other)),
+                None => Ok(Some(OwnedBroadcast::Other)),
+                Some(OwnedBroadcast::Other) if allow_dup => Ok(Some(OwnedBroadcast::Other)),
                 _ => Ok(None)
             }
         )?;
