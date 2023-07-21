@@ -15,8 +15,9 @@ use adnl::{
     declare_counted,
     common::{
         add_counted_object_to_map, add_counted_object_to_map_with_update, 
-        add_unbound_object_to_map, AdnlPeers, CountedObject, Counter, hash, hash_boxed, 
-        Query, QueryResult, Subscriber, TaggedByteSlice, TaggedTlObject, UpdatedAt, Version
+        add_unbound_object_to_map, add_unbound_object_to_map_with_update, AdnlPeers, 
+        CountedObject, Counter, hash, hash_boxed, Query, QueryResult, Subscriber, 
+        TaggedByteSlice, TaggedTlObject, UpdatedAt, Version
     }, 
     node::{AddressCache, AdnlNode, DataCompression, IpAddress, PeerHistory}
 };
@@ -317,12 +318,16 @@ impl Overlay {
     const SPINNER: u64 = 10;              // Milliseconds
     const TIMEOUT_BROADCAST: u64 = 60;    // Seconds
 
-    fn calc_broadcast_id(&self, data: &[u8]) -> Result<Option<BroadcastId>> {
+    fn calc_broadcast_id(&self, data: &[u8], allow_dup: bool) -> Result<Option<BroadcastId>> {
         let bcast_id = sha256_digest(data);
-        let added = add_unbound_object_to_map(
-            &self.owned_broadcasts,
+        let added = add_unbound_object_to_map_with_update(
+            &self.owned_broadcasts, 
             bcast_id,
-            || Ok(OwnedBroadcast::Other)
+            |found| match found {
+                None => Ok(Some(OwnedBroadcast::Other)),
+                Some(OwnedBroadcast::Other) if allow_dup => Ok(Some(OwnedBroadcast::Other)),
+                _ => Ok(None)
+            }
         )?;
         if !added {
             Ok(None)
@@ -598,6 +603,7 @@ impl Overlay {
         data: &TaggedByteSlice, 
         source: &Arc<dyn KeyOption>,
         overlay_key: &Arc<KeyId>,
+        allow_dup: bool,
         hops: Option<u8>
     ) -> Result<BroadcastSendInfo> {
 
@@ -605,7 +611,7 @@ impl Overlay {
         let source = source.clone();
         let (sender, mut reader) = tokio::sync::mpsc::unbounded_channel();
 
-        let bcast_id = if let Some(bcast_id) = overlay.calc_broadcast_id(data.object)? {
+        let bcast_id = if let Some(bcast_id) = overlay.calc_broadcast_id(data.object, allow_dup)? {
             bcast_id
         } else {
             log::warn!(target: TARGET, "Trying to send duplicated broadcast");
@@ -924,7 +930,7 @@ impl Overlay {
         let (data, mut bcast_id, check) = match DataCompression::decompress(&data) {
             Some(maybe) => {
                 let signature = Self::calc_broadcast_to_sign(&maybe, bcast.date, src)?;
-                match overlay.calc_broadcast_id(&signature)? {
+                match overlay.calc_broadcast_id(&signature, false)? {
                     Some(bcast_id) => match src_key.verify(&signature, &bcast.signature) {
                         Ok(_) => {
                             overlay.adnl.set_options(AdnlNode::OPTION_FORCE_COMPRESSION);
@@ -939,7 +945,7 @@ impl Overlay {
         };
         if check {
             let signature = Self::calc_broadcast_to_sign(&data[..], bcast.date, src)?;
-            bcast_id = overlay.calc_broadcast_id(&signature)?;
+            bcast_id = overlay.calc_broadcast_id(&signature, false)?;
             if bcast_id.is_some() {
                 src_key.verify(&signature, &bcast.signature)?
             }
@@ -1164,11 +1170,12 @@ impl Overlay {
         data: &TaggedByteSlice<'_>, 
         source: &Arc<dyn KeyOption>,
         overlay_key: &Arc<KeyId>,
+        allow_dup: bool, 
         hops: Option<u8>
     ) -> Result<BroadcastSendInfo> {
         let date = Version::get();
         let signature = Self::calc_broadcast_to_sign(data.object, date, [0u8; 32])?;
-        let bcast_id = if let Some(bcast_id) = overlay.calc_broadcast_id(&signature)? {
+        let bcast_id = if let Some(bcast_id) = overlay.calc_broadcast_id(&signature, allow_dup)? {
             bcast_id
         } else {
             log::warn!(target: TARGET, "Trying to send duplicated broadcast");
@@ -1724,6 +1731,7 @@ impl OverlayNode {
         overlay_id: &Arc<OverlayShortId>, 
         data: &TaggedByteSlice<'_>, 
         source: Option<&Arc<dyn KeyOption>>,
+        allow_dup: bool, 
         hops: Option<u8>
     ) -> Result<BroadcastSendInfo> {
         log::trace!(target: TARGET, "Broadcast {} bytes", data.object.len());
@@ -1731,9 +1739,9 @@ impl OverlayNode {
         let source = source.unwrap_or(&self.node_key);
         let overlay_key = overlay.overlay_key.as_ref().unwrap_or(&self.node_key).id();
         if data.object.len() <= Self::MAX_SIZE_ORDINARY_BROADCAST {
-            Overlay::send_broadcast(&overlay, data, source, overlay_key, hops).await
+            Overlay::send_broadcast(&overlay, data, source, overlay_key, allow_dup, hops).await
         } else {
-            Overlay::create_fec_send_transfer(&overlay, data, source, overlay_key, hops)
+            Overlay::create_fec_send_transfer(&overlay, data, source, overlay_key, allow_dup, hops)
         }
     } 
 
@@ -2395,4 +2403,3 @@ impl Subscriber for OverlayNode {
     }
 
 }
-
