@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version: 0.6.213
+
+- Allow to send duplicated broadcasts
+
 ## Version: 0.6.205
 
 - Do not use base64, crypto crates directly
@@ -21,12 +25,8 @@ All notable changes to this project will be documented in this file.
 
 ## Version: 0.6.93
 
-### New
-
 - Added export build commit of library
 
 ## Version: 0.6.62
-
-### New
 
 - Added control for # of hops in broadcast
