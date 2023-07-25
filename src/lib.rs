@@ -2319,6 +2319,11 @@ impl Subscriber for OverlayNode {
             // Public overlay
             match bundle.remove(0).downcast::<Broadcast>() {
                 Ok(Broadcast::Overlay_BroadcastFec(bcast)) => {
+                    if !check_fec_broadcast_message(&bcast) {
+                        // Ignore invalid messages as early as possible
+                        return Ok(true);
+                    }
+
                     Overlay::receive_fec_broadcast(
                         &overlay, 
                         bcast, 
@@ -2400,4 +2405,30 @@ impl Subscriber for OverlayNode {
         }
     }
 
+}
+
+fn check_fec_broadcast_message(message: &BroadcastFec) -> bool {
+    // TODO: move into `RaptorqEncoder::SYMBOL`
+    const SYMBOL: usize = 768;
+
+    // NOTE: 32 MB is the max reasonable data size due to the default decoder block count assumption.
+    const MAX_DATA_SIZE: usize = 32 << 20;
+
+    fn check_data_size(data_size: i32) -> bool {
+        data_size > 0 && data_size as usize <= MAX_DATA_SIZE
+    }
+
+    fn check_fec_type(fec_type: &FecType) -> bool {
+        match fec_type {
+            FecType::Fec_RaptorQ(fec_type) => {
+                fec_type.symbol_size as usize == SYMBOL
+                    && check_data_size(fec_type.data_size)
+            }
+            _ => false,
+        }
+    }
+
+    (message.seqno as u32) & 0xff000000 == 0
+        && check_data_size(message.data_size)
+        && check_fec_type(&message.fec)
 }
