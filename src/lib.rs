@@ -70,6 +70,10 @@ include!("../common/src/info.rs");
 
 const TARGET: &str = "overlay";
 const TARGET_BROADCAST: &str = "overlay_broadcast";
+#[cfg(feature = "telemetry")]
+const TARGET_EXT_MSG: &str = "overlay_ext_msg";
+#[cfg(feature = "telemetry")]
+const TAG_EXT_MSG: u32 = 0x3d1b1867;
 
 pub fn build_overlay_node_info(
     overlay: &Arc<OverlayShortId>,
@@ -732,7 +736,7 @@ impl Overlay {
             "Broadcast {} bytes to overlay {}, {} neighbours",
             data.object.len(),
             self.overlay_id,
-            neighbours.len()
+            neighbours.len()                                   
         );
         let mut peers: Option<AdnlPeers> = None;
         #[cfg(feature = "telemetry")]
@@ -957,20 +961,31 @@ impl Overlay {
         log::trace!(target: TARGET, "Received overlay broadcast, {} bytes", data.len());
         #[cfg(feature = "telemetry")]
         if data.len() >= 4 {
+            let tag = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
             log::info!(
                 target: TARGET_BROADCAST,
                 "Broadcast trace: recv ordinary {} {} bytes, tag {:08x} to overlay {}",
                 base64::encode(&bcast_id),  
                 data.len(),
-                u32::from_le_bytes([data[0], data[1], data[2], data[3]]),
+                tag,
                 overlay.overlay_id
             );
+            if tag == TAG_EXT_MSG {
+                log::info!(
+                    target: TARGET_EXT_MSG,
+                    "Received broadcast {} ({} bytes) from overlay {}, peer {}",
+                    base64::encode(bcast_id),  
+                    raw_data.len(),
+                    overlay.overlay_id,
+                    peers.other()
+                );
+            }
         }
         BroadcastReceiver::push(
             &overlay.received_rawbytes, 
             BroadcastRecvInfo {
                 packets: 1,
-                data,
+                data,                                          
                 recv_from: src_key.id().clone()
             }
         );
@@ -982,7 +997,9 @@ impl Overlay {
             #[cfg(feature = "telemetry")]
             None,
             #[cfg(feature = "telemetry")]
-            overlay.tag_broadcast_ord
+            overlay.tag_broadcast_ord,
+            #[cfg(feature = "telemetry")]
+            &bcast_id
         ).await?;
         Self::setup_broadcast_purge(overlay, bcast_id);
         Ok(())
@@ -1085,6 +1102,7 @@ impl Overlay {
         }
         #[cfg(feature = "telemetry")]
         stats.val().passed.fetch_add(1, Ordering::Relaxed);
+        let bcast_id = bcast_id.clone();
         if !transfer.completed.load(Ordering::Relaxed) {
             transfer.sender.send(Some(bcast))?;
         }
@@ -1096,7 +1114,9 @@ impl Overlay {
             #[cfg(feature = "telemetry")]
             Some(stats.val()),
             #[cfg(feature = "telemetry")]
-            overlay.tag_broadcast_fec
+            overlay.tag_broadcast_fec,
+            #[cfg(feature = "telemetry")]
+            &bcast_id
         ).await
     }
 
@@ -1109,7 +1129,9 @@ impl Overlay {
         #[cfg(feature = "telemetry")]
         stats: Option<&TransferStats>,
         #[cfg(feature = "telemetry")]
-        tag: u32
+        tag: u32,
+        #[cfg(feature = "telemetry")]
+        bcast_id: &[u8]
     ) -> Result<()> {
         let options = self.options.load(Ordering::Relaxed);
         if (options & Overlay::OPTION_DISABLE_BROADCAST_RETRANSMIT) != 0 {
@@ -1161,7 +1183,19 @@ impl Overlay {
                 peers.local(),
                 &neighbours,
             ).await
+        }?;
+        #[cfg(feature = "telemetry")]
+        if tag == TAG_EXT_MSG {
+            log::info!(
+                target: TARGET_EXT_MSG,
+                "Distributed broadcast {} ({} bytes) to overlay {}, peers {:?}",
+                base64::encode(bcast_id),  
+                raw_data.len(),
+                self.overlay_id,
+                &neighbours
+            );
         }
+        Ok(())
     }
 
     async fn send_broadcast(
@@ -1194,6 +1228,16 @@ impl Overlay {
         }.into_boxed();
         let signature = key.sign(&serialize(&to_sign)?)?;
 */
+        #[cfg(feature = "telemetry")]
+        if data.tag == TAG_EXT_MSG {
+            log::info!(
+                target: TARGET_EXT_MSG,
+                "Will send broadcast {} ({} bytes) to overlay {}",
+                base64::encode(&bcast_id),  
+                data.object.len(),
+                overlay.overlay_id
+            );
+        }
         #[cfg(feature = "telemetry")]
         log::info!(
             target: TARGET_BROADCAST,
