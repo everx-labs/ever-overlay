@@ -960,7 +960,7 @@ impl Overlay {
         };
         log::trace!(target: TARGET, "Received overlay broadcast, {} bytes", data.len());
         #[cfg(feature = "telemetry")]
-        if data.len() >= 4 {
+        let tag = if data.len() >= 4 {
             let tag = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
             log::info!(
                 target: TARGET_BROADCAST,
@@ -980,7 +980,10 @@ impl Overlay {
                     peers.other()
                 );
             }
-        }
+            tag
+        } else {
+            overlay.tag_broadcast_ord
+        };
         BroadcastReceiver::push(
             &overlay.received_rawbytes, 
             BroadcastRecvInfo {
@@ -997,7 +1000,7 @@ impl Overlay {
             #[cfg(feature = "telemetry")]
             None,
             #[cfg(feature = "telemetry")]
-            overlay.tag_broadcast_ord,
+            tag,
             #[cfg(feature = "telemetry")]
             &bcast_id
         ).await?;
@@ -1102,6 +1105,7 @@ impl Overlay {
         }
         #[cfg(feature = "telemetry")]
         stats.val().passed.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "telemetry")]
         let bcast_id = bcast_id.clone();
         if !transfer.completed.load(Ordering::Relaxed) {
             transfer.sender.send(Some(bcast))?;
