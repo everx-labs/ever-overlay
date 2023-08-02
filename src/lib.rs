@@ -1190,18 +1190,23 @@ impl Overlay {
         }?;
         #[cfg(feature = "telemetry")]
         if tag == TAG_EXT_MSG {
+            let mut addrs = Vec::new();
+            for neighbour in neighbours {
+                addrs.push(format!("{}", neighbour))
+            }
             log::info!(
                 target: TARGET_EXT_MSG,
-                "Distributed broadcast {} ({} bytes) to overlay {}, peers {:?}",
+                "Distributed broadcast {} ({} bytes) to overlay {}, {} peers {:?}",
                 base64::encode(bcast_id),  
                 raw_data.len(),
                 self.overlay_id,
-                &neighbours
+                addrs.len(),
+                addrs
             );
         }
         Ok(())
     }
-
+                              
     async fn send_broadcast(
         overlay: &Arc<Self>, 
         data: &TaggedByteSlice<'_>, 
