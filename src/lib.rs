@@ -24,7 +24,7 @@ use adnl::{
 #[cfg(feature = "telemetry")]
 use adnl::telemetry::Metric;
 use num_traits::pow::Pow;
-use rldp::{RaptorqDecoder, RaptorqEncoder, RldpNode};
+use rldp::{Constraints, RaptorqDecoder, RaptorqEncoder, RldpNode};
 use std::{
     convert::TryInto, sync::{Arc, atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering}},
     time::Duration
@@ -2125,6 +2125,16 @@ impl OverlayNode {
         Ok(added)
     }
 
+    fn check_fec_broadcast_message(message: &BroadcastFec) -> Result<()> {
+        const CONSTRAINTS: Constraints = Constraints {
+            data_size: 32 << 20 // NOTE: 32 MB is the max reasonable data size due to 
+                                // the default decoder block count assumption.
+        };
+        CONSTRAINTS.check_fec_type(&message.fec)?; 
+        CONSTRAINTS.check_data_size(message.data_size)?;
+        Constraints::check_seqno(message.seqno as u32)
+    }
+
     fn check_overlay_adnl_address(&self, overlay: &Arc<Overlay>, adnl: &Arc<KeyId>) -> bool {
         let local_adnl = overlay.overlay_key.as_ref().unwrap_or(&self.node_key).id();
         if local_adnl != adnl {
@@ -2321,6 +2331,11 @@ impl Subscriber for OverlayNode {
             // Public overlay
             match bundle.remove(0).downcast::<Broadcast>() {
                 Ok(Broadcast::Overlay_BroadcastFec(bcast)) => {
+                    if let Err(e) = OverlayNode::check_fec_broadcast_message(&bcast) {
+                        // Ignore invalid messages as early as possible
+                        log::warn!(target: TARGET, "Received bad FEC broadcast. {}", e); 
+                        return Ok(true);
+                    }
                     Overlay::receive_fec_broadcast(
                         &overlay, 
                         bcast, 

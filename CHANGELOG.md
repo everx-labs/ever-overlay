@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.6.217
+
+- Overlay message sanity check
+
 ## Version: 0.6.213
 
 - Allow to send duplicated broadcasts
