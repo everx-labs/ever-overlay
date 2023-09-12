@@ -267,6 +267,7 @@ declare_counted!(
         adnl: Arc<AdnlNode>,
         bad_peers: lockfree::set::Set<Arc<KeyId>>,
         flags: u8,
+        hops: Option<u8>,
         known_peers: AddressCache,
         message_prefix: Vec<u8>,
         neighbours: AddressCache,
@@ -603,8 +604,7 @@ impl Overlay {
         data: &TaggedByteSlice, 
         source: &Arc<dyn KeyOption>,
         overlay_key: &Arc<KeyId>,
-        allow_dup: bool,
-        hops: Option<u8>
+        allow_dup: bool
     ) -> Result<BroadcastSendInfo> {
 
         let overlay_clone = overlay.clone();
@@ -681,7 +681,7 @@ impl Overlay {
 
         let overlay = overlay.clone();
         let overlay_key = overlay_key.clone();
-        let (hops, neighbours) = overlay.calc_broadcast_neighbours(hops, 5, None)?;
+        let (hops, neighbours) = overlay.calc_broadcast_neighbours(overlay.hops, 5, None)?;
         let ret = BroadcastSendInfo {
             packets: max_seqno,
             send_to: neighbours.len() as u32
@@ -1126,7 +1126,7 @@ impl Overlay {
             }
             Some(hops)
         } else {
-            None
+            self.hops
         };                          
         let (hops, neighbours) = self.calc_broadcast_neighbours(
             hops, 
@@ -1170,8 +1170,7 @@ impl Overlay {
         data: &TaggedByteSlice<'_>, 
         source: &Arc<dyn KeyOption>,
         overlay_key: &Arc<KeyId>,
-        allow_dup: bool, 
-        hops: Option<u8>
+        allow_dup: bool
     ) -> Result<BroadcastSendInfo> {
         let date = Version::get();
         let signature = Self::calc_broadcast_to_sign(data.object, date, [0u8; 32])?;
@@ -1220,7 +1219,7 @@ impl Overlay {
         }.into_boxed();
         let mut buf = overlay.message_prefix.clone();
         serialize_boxed_append(&mut buf, &bcast)?;
-        let (hops, neighbours) = overlay.calc_broadcast_neighbours(hops, 3, None)?;
+        let (hops, neighbours) = overlay.calc_broadcast_neighbours(overlay.hops, 3, None)?;
         if let Some(hops) = hops {  
             buf.push(hops);
         }
@@ -1612,15 +1611,36 @@ impl OverlayNode {
         )
     }
 
+    /// Add overlay for local workchain
+    pub fn add_local_workchain_overlay(
+        &self, 
+        runtime: Option<tokio::runtime::Handle>,
+        overlay_id: &Arc<OverlayShortId>,
+        hops: Option<u8>
+    ) -> Result<bool> {
+        self.add_overlay(runtime, overlay_id, None, 0, hops)
+    }
+
+    /// Add overlay for other workchain
+    pub fn add_other_workchain_overlay(
+        &self, 
+        runtime: Option<tokio::runtime::Handle>,
+        overlay_id: &Arc<OverlayShortId>,
+        hops: Option<u8>
+    ) -> Result<bool> {
+        self.add_overlay(runtime, overlay_id, None, Overlay::FLAG_OVERLAY_OTHER_WORKCHAIN, hops)
+    }
+
     /// Add private_overlay
     pub fn add_private_overlay(
         &self, 
         runtime: Option<tokio::runtime::Handle>,
         overlay_id: &Arc<OverlayShortId>,
         overlay_key: &Arc<dyn KeyOption>, 
-        peers: &[Arc<KeyId>]
+        peers: &[Arc<KeyId>],
+        hops: Option<u8>
     ) -> Result<bool> {
-        if self.add_overlay(runtime, overlay_id, Some(overlay_key.clone()), 0)? {
+        if self.add_overlay(runtime, overlay_id, Some(overlay_key.clone()), 0, hops)? {
             let overlay = self.get_overlay(overlay_id, "Cannot add the private overlay")?;
             let our_key = overlay_key.id();
             for peer in peers {
@@ -1707,41 +1727,22 @@ impl OverlayNode {
         Ok(Some(ret))
     }
 
-    /// Add overlay for local workchain
-    pub fn add_local_workchain_overlay(
-        &self, 
-        runtime: Option<tokio::runtime::Handle>,
-        overlay_id: &Arc<OverlayShortId>
-    ) -> Result<bool> {
-        self.add_overlay(runtime, overlay_id, None, 0)
-    }
-
-    /// Add overlay for other workchain
-    pub fn add_other_workchain_overlay(
-        &self, 
-        runtime: Option<tokio::runtime::Handle>,
-        overlay_id: &Arc<OverlayShortId>
-    ) -> Result<bool> {
-        self.add_overlay(runtime, overlay_id, None, Overlay::FLAG_OVERLAY_OTHER_WORKCHAIN)
-    }
-
     /// Broadcast message 
     pub async fn broadcast(
         &self,
         overlay_id: &Arc<OverlayShortId>, 
         data: &TaggedByteSlice<'_>, 
         source: Option<&Arc<dyn KeyOption>>,
-        allow_dup: bool, 
-        hops: Option<u8>
+        allow_dup: bool
     ) -> Result<BroadcastSendInfo> {
         log::trace!(target: TARGET, "Broadcast {} bytes", data.object.len());
         let overlay = self.get_overlay(overlay_id, "Trying broadcast to unknown overlay")?;
         let source = source.unwrap_or(&self.node_key);
         let overlay_key = overlay.overlay_key.as_ref().unwrap_or(&self.node_key).id();
         if data.object.len() <= Self::MAX_SIZE_ORDINARY_BROADCAST {
-            Overlay::send_broadcast(&overlay, data, source, overlay_key, allow_dup, hops).await
+            Overlay::send_broadcast(&overlay, data, source, overlay_key, allow_dup).await
         } else {
-            Overlay::create_fec_send_transfer(&overlay, data, source, overlay_key, allow_dup, hops)
+            Overlay::create_fec_send_transfer(&overlay, data, source, overlay_key, allow_dup)
         }
     } 
 
@@ -1997,7 +1998,8 @@ impl OverlayNode {
         runtime: Option<tokio::runtime::Handle>,
         overlay_id: &Arc<OverlayShortId>, 
         overlay_key: Option<Arc<dyn KeyOption>>,
-        flags: u8
+        flags: u8,
+        hops: Option<u8>
     ) -> Result<bool> {
         log::debug!(target: TARGET, "Add overlay {} to node", overlay_id);
         if overlay_key.is_some() && ((flags & Overlay::FLAG_OVERLAY_OTHER_WORKCHAIN) != 0) {
@@ -2029,6 +2031,7 @@ impl OverlayNode {
                     adnl: self.adnl.clone(),
                     bad_peers: lockfree::set::Set::new(),
                     flags,
+                    hops,
                     known_peers: AddressCache::with_limit(Self::MAX_PEERS),
                     message_prefix: serialize_boxed(&message_prefix)?,
                     neighbours: AddressCache::with_limit(Self::MAX_OVERLAY_NEIGHBOURS), 
