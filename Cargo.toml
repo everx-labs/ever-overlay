@@ -3,7 +3,7 @@ build = './common/build/build.rs'
 description = 'Overlay protocol library'
 edition = '2021'
 name = 'overlay'
-version = '0.6.246'
+version = '0.7.0'
 
 [dependencies]
 async-trait = '0.1'
