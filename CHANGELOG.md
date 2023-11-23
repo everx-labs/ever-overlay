@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.7.2
+
+- Async processing of queries
+
 ## Version 0.7.0
 
 - Support BLS-related broadcasts
