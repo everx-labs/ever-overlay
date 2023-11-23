@@ -16,8 +16,8 @@ use adnl::{
     common::{
         add_counted_object_to_map, add_counted_object_to_map_with_update, 
         add_unbound_object_to_map, add_unbound_object_to_map_with_update, AdnlPeers, 
-        CountedObject, Counter, hash, hash_boxed, Query, QueryResult, Subscriber, 
-        TaggedByteSlice, TaggedTlObject, UpdatedAt, Version
+        CountedObject, Counter, hash, hash_boxed, Query, QueryAnswer, QueryResult, 
+        Subscriber, TaggedByteSlice, TaggedTlObject, UpdatedAt, Version
     }, 
     node::{AddressCache, AdnlNode, DataCompression, IpAddress, PeerHistory}
 };
@@ -2433,7 +2433,7 @@ impl Subscriber for OverlayNode {
             fail!("Query to unknown overlay {}", overlay_id) 
         };
         if !self.check_overlay_adnl_address(&overlay, peers.local()) {
-            return Ok(QueryResult::Consumed(None))
+            return Ok(QueryResult::Consumed(QueryAnswer::Ready(None)))
         }
         let other_workchain = (overlay.flags & Overlay::FLAG_OVERLAY_OTHER_WORKCHAIN) != 0;
         #[cfg(feature = "telemetry")] 
@@ -2449,13 +2449,13 @@ impl Subscriber for OverlayNode {
                         #[cfg(feature = "telemetry")]
                         None
                     ),
-                    None => Ok(QueryResult::Consumed(None))
+                    None => Ok(QueryResult::Consumed(QueryAnswer::Ready(None)))
                 }
             }
             Err(object) => object
         };
         if other_workchain {
-            return Ok(QueryResult::Consumed(None))
+            return Ok(QueryResult::Consumed(QueryAnswer::Ready(None)))
         }
         let consumer = if let Some(consumer) = self.consumers.get(&overlay_id) {
             consumer.val().object.clone()
