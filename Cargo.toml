@@ -13,13 +13,13 @@ hex = '0.4'
 log = '0.4'
 num-traits = '0.2'
 rand = '0.7'
-adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.9.15' }
+adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = 'pre_smft-rc' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-rldp = { git = 'https://github.com/tonlabs/ever-rldp.git', tag = '0.8.8' }
+rldp = { git = 'https://github.com/tonlabs/ever-rldp.git', tag = 'pre_smft-rc' }
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
-ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.53' }
-ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.117' }
-ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.31' }
+ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = 'pre_smft-rc' }
+ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = 'pre_smft-rc' }
+ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = 'pre_smft-rc' }
 
 [features]
 dump = [ 'adnl/dump' ]
