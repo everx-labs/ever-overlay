@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.7.17
+
+- Added flag started_listening to fix queue overflow
+
 ## Version 0.7.2
 
 - Async processing of queries

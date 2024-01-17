@@ -100,15 +100,19 @@ struct BroadcastReceiver<T> {
     data: lockfree::queue::Queue<Option<T>>,
     subscribers: lockfree::queue::Queue<Arc<tokio::sync::Barrier>>,
     synclock: AtomicU32,
+    started_listening: AtomicBool,
 }
 
 impl <T: Send + 'static> BroadcastReceiver<T> {
 
     fn push(receiver: &Arc<Self>, data: T) {
-        Self::do_push(receiver, Some(data))
+        if receiver.started_listening.load(Ordering::Relaxed) {
+            Self::do_push(receiver, Some(data))
+        }
     }
 
     async fn pop(&self) -> Result<Option<T>> {
+        self.started_listening.store(true, Ordering::Relaxed);
         self.synclock.fetch_add(1, Ordering::Relaxed);
         loop {
             if let Some(data) = self.data.pop() {
@@ -503,10 +507,10 @@ impl Overlay {
                                 flags |= RecvTransferFecTelemetry::FLAG_RECEIVED;
                             }
                             BroadcastReceiver::push(
-                                &overlay_recv.received_rawbytes, 
+                                &overlay_recv.received_rawbytes,
                                 BroadcastRecvInfo {
-                                    packets, 
-                                    data, 
+                                    packets,
+                                    data,
                                     recv_from: source_recv
                                 }
                             );
@@ -972,7 +976,7 @@ impl Overlay {
             );
         }
         BroadcastReceiver::push(
-            &overlay.received_rawbytes, 
+            &overlay.received_rawbytes,
             BroadcastRecvInfo {
                 packets: 1,
                 data,
@@ -2036,7 +2040,8 @@ impl OverlayNode {
                         BroadcastReceiver {
                             data: lockfree::queue::Queue::new(),
                             subscribers: lockfree::queue::Queue::new(),
-                            synclock: AtomicU32::new(0)
+                            synclock: AtomicU32::new(0),
+                            started_listening: AtomicBool::new(false)
                         }
                     );
                     Some(received_catchain)
@@ -2048,7 +2053,8 @@ impl OverlayNode {
                         BroadcastReceiver {
                             data: lockfree::queue::Queue::new(),
                             subscribers: lockfree::queue::Queue::new(),
-                            synclock: AtomicU32::new(0)
+                            synclock: AtomicU32::new(0),
+                            started_listening: AtomicBool::new(false)
                         }
                     );
                     Some(received_block_status)
@@ -2078,14 +2084,16 @@ impl OverlayNode {
                         BroadcastReceiver {
                             data: lockfree::queue::Queue::new(),
                             subscribers: lockfree::queue::Queue::new(),
-                            synclock: AtomicU32::new(0)
+                            synclock: AtomicU32::new(0),
+                            started_listening: AtomicBool::new(false)
                         }
                     ),
                     received_rawbytes: Arc::new(
                         BroadcastReceiver {
                             data: lockfree::queue::Queue::new(),
                             subscribers: lockfree::queue::Queue::new(),
-                            synclock: AtomicU32::new(0)
+                            synclock: AtomicU32::new(0),
+                            started_listening: AtomicBool::new(false)
                         }
                     ),
                     #[cfg(feature = "telemetry")]
