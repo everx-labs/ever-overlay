@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.7.25
+
+- Rebranding ton -> everx
+
 ## Version 0.7.24
 
 - Prepare to make united crate for protocols
