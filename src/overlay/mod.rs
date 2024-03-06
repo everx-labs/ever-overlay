@@ -68,8 +68,6 @@ use ton_types::{
     base64_decode, base64_encode, KeyId, KeyOption, Result, sha256_digest, UInt256
 };
 
-include!("../common/src/info.rs");
-
 const TARGET: &str = "overlay";
 const TARGET_BROADCAST: &str = "overlay_broadcast";
 
