@@ -7,9 +7,13 @@
 * Unless required by applicable law or agreed to in writing, software
 * distributed under the License is distributed on an "AS IS" BASIS,
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific TON DEV software governing permissions and
+* See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
+
+// TO REMOVE AFTER FULL REBRANDING
+extern crate ton_api as ever_api;
+extern crate ton_types as ever_types;
 
 use adnl::{
     declare_counted,
@@ -31,9 +35,9 @@ use std::{
 };
 #[cfg(feature = "telemetry")]
 use std::time::Instant;
-use ton_api::{
+use ever_api::{
     deserialize_boxed_bundle_with_suffix, IntoBoxed, serialize_boxed, serialize_boxed_append, 
-    ton::{
+    ton::{ //ever::{
         TLObject, adnl::id::short::Short as AdnlShortId, 
         catchain::{
             FirstBlock as CatchainFirstBlock, Update as CatchainBlockUpdateBoxed, 
@@ -53,8 +57,9 @@ use ton_api::{
         },
         pub_::publickey::{Ed25519, Overlay as OverlayKey}, 
         rpc::overlay::{GetRandomPeers, Query as OverlayQuery}, 
-        ton_node::shardpublicoverlayid::ShardPublicOverlayId,
-        ton_node::BlockCandidateStatus,
+        ton_node::{ //ever_node::{
+            BlockCandidateStatus, shardpublicoverlayid::ShardPublicOverlayId
+        },
         validator_session::{
             BlockUpdate as ValidatorSessionBlockUpdateBoxed, 
             blockupdate::BlockUpdate as ValidatorSessionBlockUpdate
@@ -62,8 +67,8 @@ use ton_api::{
     }
 };
 #[cfg(feature = "telemetry")]
-use ton_api::{BoxedSerialize, tag_from_boxed_type, tag_from_bare_type};
-use ton_types::{
+use ever_api::{BoxedSerialize, tag_from_boxed_type, tag_from_bare_type};
+use ever_types::{
     error, fail, 
     base64_decode, base64_encode, KeyId, KeyOption, Result, sha256_digest, UInt256
 };
@@ -1189,14 +1194,14 @@ impl Overlay {
         };
 /*        
         let bcast_id = BroadcastOrdId {
-            src: ton::int256([0u8; 32]),
-            data_hash: ton::int256(data_hash),
+            src: ever::int256([0u8; 32]),
+            data_hash: ever::int256(data_hash),
             flags: Self::FLAG_BCAST_ANY_SENDER
         };
         let data_hash = hash(bcast_id)?;
 
         let to_sign = BroadcastToSign {
-            hash: ton::int256(data_hash),
+            hash: ever::int256(data_hash),
             date
         }.into_boxed();
         let signature = key.sign(&serialize(&to_sign)?)?;
