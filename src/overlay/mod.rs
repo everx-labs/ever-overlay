@@ -1192,20 +1192,6 @@ impl Overlay {
             log::warn!(target: TARGET, "Trying to send duplicated broadcast");
             return Ok(BroadcastSendInfo::default())
         };
-/*        
-        let bcast_id = BroadcastOrdId {
-            src: ever::int256([0u8; 32]),
-            data_hash: ever::int256(data_hash),
-            flags: Self::FLAG_BCAST_ANY_SENDER
-        };
-        let data_hash = hash(bcast_id)?;
-
-        let to_sign = BroadcastToSign {
-            hash: ever::int256(data_hash),
-            date
-        }.into_boxed();
-        let signature = key.sign(&serialize(&to_sign)?)?;
-*/
         #[cfg(feature = "telemetry")]
         log::info!(
             target: TARGET_BROADCAST,
