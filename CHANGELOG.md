@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.7.26
+
+- Code clean up 
+
 ## Version 0.7.25
 
 - Rebranding ton -> everx
