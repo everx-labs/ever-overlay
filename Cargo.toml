@@ -3,7 +3,7 @@ build = './common/build/build.rs'
 description = 'Overlay protocol library'
 edition = '2021'
 name = 'overlay'
-version = '0.7.31'
+version = '0.7.32'
 
 [dependencies]
 async-trait = '0.1'
@@ -14,9 +14,9 @@ log = '0.4'
 num-traits = '0.2'
 rand = '0.7'
 tokio = { features = [ 'rt-multi-thread' ], version = '1.5' }
-adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.10.6' }
+adnl = { features = [ 'node' ], git = 'https://github.com/tonlabs/ever-adnl.git', tag = '0.10.7' }
 lockfree = { git = 'https://github.com/tonlabs/lockfree.git' }
-rldp = { git = 'https://github.com/tonlabs/ever-rldp.git', tag = '0.8.25' }
+rldp = { git = 'https://github.com/tonlabs/ever-rldp.git', tag = '0.8.26' }
 ton_api = { git = 'https://github.com/tonlabs/ever-tl.git', package = 'ton_api', tag = '0.3.64' }
 ton_block = { git = 'https://github.com/tonlabs/ever-block.git', tag = '1.9.128' }
 ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.34' }
