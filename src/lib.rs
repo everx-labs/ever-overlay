@@ -316,6 +316,9 @@ impl Overlay {
     const MAX_HOPS: u8 = 15;
     const OPTION_DISABLE_BROADCAST_RETRANSMIT: u32 = 0x01;
     const SIZE_BROADCAST_WAVE: u32 = 20;
+    const SIZE_NEIGHBOURS_LONG_BROADCAST: u8 = 5;
+    const SIZE_NEIGHBOURS_SHORT_BROADCAST: u8 = 5;
+
     const SPINNER: u64 = 10;              // Milliseconds
     const TIMEOUT_BROADCAST: u64 = 60;    // Seconds
 
@@ -681,7 +684,11 @@ impl Overlay {
 
         let overlay = overlay.clone();
         let overlay_key = overlay_key.clone();
-        let (hops, neighbours) = overlay.calc_broadcast_neighbours(overlay.hops, 5, None)?;
+        let (hops, neighbours) = overlay.calc_broadcast_neighbours(
+            overlay.hops,  
+            Self::SIZE_NEIGHBOURS_LONG_BROADCAST, 
+            None
+        )?;
         let ret = BroadcastSendInfo {
             packets: max_seqno,
             send_to: neighbours.len() as u32
@@ -956,16 +963,20 @@ impl Overlay {
         };
         log::trace!(target: TARGET, "Received overlay broadcast, {} bytes", data.len());
         #[cfg(feature = "telemetry")]
-        if data.len() >= 4 {
+        let tag = if data.len() >= 4 {
+            let tag = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
             log::info!(
                 target: TARGET_BROADCAST,
                 "Broadcast trace: recv ordinary {} {} bytes, tag {:08x} to overlay {}",
                 base64_encode(&bcast_id),  
                 data.len(),
-                u32::from_le_bytes([data[0], data[1], data[2], data[3]]),
+                tag,
                 overlay.overlay_id
             );
-        }
+            tag
+        } else {
+            overlay.tag_broadcast_ord
+        };
         BroadcastReceiver::push(
             &overlay.received_rawbytes, 
             BroadcastRecvInfo {
@@ -978,11 +989,13 @@ impl Overlay {
             raw_data,
             check_hops,
             peers,
-            3, 
+            Self::SIZE_NEIGHBOURS_SHORT_BROADCAST, 
             #[cfg(feature = "telemetry")]
             None,
             #[cfg(feature = "telemetry")]
-            overlay.tag_broadcast_ord
+            tag,
+            #[cfg(feature = "telemetry")]
+            &bcast_id
         ).await?;
         Self::setup_broadcast_purge(overlay, bcast_id);
         Ok(())
@@ -1086,6 +1099,8 @@ impl Overlay {
         }
         #[cfg(feature = "telemetry")]
         stats.val().passed.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "telemetry")]
+        let bcast_id = bcast_id.clone();
         if !transfer.completed.load(Ordering::Relaxed) {
             transfer.sender.send(Some(bcast))?;
         }
@@ -1093,11 +1108,13 @@ impl Overlay {
             raw_data,
             check_hops,
             peers,
-            5, 
+            Self::SIZE_NEIGHBOURS_LONG_BROADCAST, 
             #[cfg(feature = "telemetry")]
             Some(stats.val()),
             #[cfg(feature = "telemetry")]
-            overlay.tag_broadcast_fec
+            overlay.tag_broadcast_fec,
+            #[cfg(feature = "telemetry")]
+            &bcast_id
         ).await
     }
 
@@ -1110,7 +1127,9 @@ impl Overlay {
         #[cfg(feature = "telemetry")]
         stats: Option<&TransferStats>,
         #[cfg(feature = "telemetry")]
-        tag: u32
+        tag: u32,
+        #[cfg(feature = "telemetry")]
+        bcast_id: &[u8]
     ) -> Result<()> {
         let options = self.options.load(Ordering::Relaxed);
         if (options & Overlay::OPTION_DISABLE_BROADCAST_RETRANSMIT) != 0 {
@@ -1219,7 +1238,11 @@ impl Overlay {
         }.into_boxed();
         let mut buf = overlay.message_prefix.clone();
         serialize_boxed_append(&mut buf, &bcast)?;
-        let (hops, neighbours) = overlay.calc_broadcast_neighbours(overlay.hops, 3, None)?;
+        let (hops, neighbours) = overlay.calc_broadcast_neighbours(
+            overlay.hops,
+            Self::SIZE_NEIGHBOURS_SHORT_BROADCAST, 
+            None
+        )?;
         if let Some(hops) = hops {  
             buf.push(hops);
         }

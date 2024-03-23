@@ -24,4 +24,3 @@ ton_types = { git = 'https://github.com/tonlabs/ever-types.git', tag = '2.0.28' 
 [features]
 dump = [ 'adnl/dump' ]
 telemetry = [ 'adnl/telemetry', 'rldp/telemetry' ]
-
