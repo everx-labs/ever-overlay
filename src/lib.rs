@@ -316,8 +316,8 @@ impl Overlay {
     const MAX_HOPS: u8 = 15;
     const OPTION_DISABLE_BROADCAST_RETRANSMIT: u32 = 0x01;
     const SIZE_BROADCAST_WAVE: u32 = 20;
-    const SIZE_NEIGHBOURS_LONG_BROADCAST: u8 = 5;
-    const SIZE_NEIGHBOURS_SHORT_BROADCAST: u8 = 5;
+    const SIZE_NEIGHBOURS_LONG_BROADCAST: u8 = 7;
+    const SIZE_NEIGHBOURS_SHORT_BROADCAST: u8 = 7;
 
     const SPINNER: u64 = 10;              // Milliseconds
     const TIMEOUT_BROADCAST: u64 = 60;    // Seconds
