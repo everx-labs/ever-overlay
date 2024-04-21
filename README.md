@@ -1,3 +1,7 @@
+# WARNING! This repository is obsolete
+
+Overlay protocol implementation was merged into the repository https://github.com/tonlabs/ever-adnl.git
+
 # Overlay
 
 Overlay protocol implementation
